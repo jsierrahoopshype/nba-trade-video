@@ -1,0 +1,1276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NBA Trade Video Generator</title>
+<!-- Live salary data is parsed with PapaParse (never bundled) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<style>
+  :root {
+    --bg: #0b0f17;
+    --panel: #131a26;
+    --panel2: #1b2433;
+    --line: #283449;
+    --text: #e8edf5;
+    --muted: #8896ac;
+    --accent: #4f8cff;
+    --green: #22c55e;
+    --red: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  header h1 { font-size: 18px; margin: 0; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  .layout {
+    display: grid;
+    grid-template-columns: 420px 1fr;
+    gap: 0;
+    min-height: calc(100vh - 52px);
+  }
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; }
+  }
+  .controls {
+    padding: 18px;
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+  }
+  .stage {
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+  select, input[type=text] {
+    width: 100%;
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 9px 10px;
+    font-size: 14px;
+  }
+  .team-block { margin-bottom: 14px; }
+  .team-block .tname { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; }
+  .team-block .tname img { width: 24px; height: 24px; object-fit: contain; }
+  .results {
+    max-height: 190px;
+    overflow-y: auto;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    margin-top: 4px;
+    background: var(--panel2);
+  }
+  .results .row {
+    padding: 7px 10px;
+    cursor: pointer;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    border-bottom: 1px solid rgba(255,255,255,.04);
+  }
+  .results .row:hover { background: rgba(79,140,255,.15); }
+  .results .row .sal { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip {
+    background: var(--panel2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 4px 10px 4px 12px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .chip b { font-weight: 600; }
+  .chip .x { cursor: pointer; color: var(--muted); font-weight: 700; }
+  .chip .x:hover { color: var(--red); }
+  .tally { margin-top: 6px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .toggles { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+  .toggle { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--text); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .seg button {
+    background: var(--panel2); color: var(--muted); border: none;
+    padding: 7px 12px; cursor: pointer; font-size: 13px;
+  }
+  .seg button.active { background: var(--accent); color: #fff; }
+  .btn {
+    display: inline-block; border: none; border-radius: 8px;
+    padding: 11px 16px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-ghost { background: var(--panel2); color: var(--text); border: 1px solid var(--line); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  #status { font-size: 12px; color: var(--muted); min-height: 16px; }
+  #verdictLine { font-size: 13px; margin-top: 6px; }
+  #verdictLine.ok { color: var(--green); }
+  #verdictLine.bad { color: var(--red); }
+  canvas#stageCanvas {
+    background: #000; border-radius: 12px; border: 1px solid var(--line);
+    max-width: 100%; max-height: 72vh; height: auto;
+  }
+  video#out { max-width: 100%; max-height: 50vh; border-radius: 12px; display: none; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.5; }
+  code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NBA Trade Video Generator</h1>
+  <span class="sub">Live salaries · CBA-checked · canvas + MediaRecorder</span>
+</header>
+
+<div class="layout">
+  <!-- ============ CONTROLS ============ -->
+  <div class="controls">
+    <div class="card">
+      <h2>1 · Pick two teams</h2>
+      <div id="teamPickers">Loading live salary data…</div>
+    </div>
+
+    <div class="card">
+      <h2>2 · Build the trade</h2>
+      <div id="builders"></div>
+      <div class="hint">Each player you add is sent OUT by that team and received by the other. (Two-team trade.)</div>
+    </div>
+
+    <div class="card">
+      <h2>3 · Video options</h2>
+      <label>Aspect ratio</label>
+      <div class="seg" id="aspectSeg">
+        <button data-aspect="9:16" class="active">Vertical 9:16</button>
+        <button data-aspect="1:1">Square 1:1</button>
+      </div>
+      <label style="margin-top:12px">Quiz mode</label>
+      <div class="toggle">
+        <input type="checkbox" id="quizMode">
+        <span>Freeze on “What does [Team] need to send?” before the reveal</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>4 · Render</h2>
+      <div class="actions">
+        <button class="btn btn-ghost" id="previewBtn">▶ Preview animation</button>
+        <button class="btn btn-primary" id="recordBtn">⬤ Record &amp; download</button>
+      </div>
+      <div id="verdictLine"></div>
+      <div id="status"></div>
+    </div>
+  </div>
+
+  <!-- ============ STAGE ============ -->
+  <div class="stage">
+    <canvas id="stageCanvas" width="1080" height="1920"></canvas>
+    <video id="out" controls></video>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================================
+   NBA Trade Video Generator — standalone, single file.
+   Salary data is fetched LIVE from the worker and parsed with PapaParse.
+   The CBA salary-matching / trade-legality engine below is replicated from the
+   existing NBA Trade Machine (TransactionMaster/index.html) — copied in, not
+   imported. The original tool is never modified.
+   ============================================================================ */
+
+/* ---------------------------- live data sources --------------------------- */
+const SALARIES_URL = 'https://nba-trade-calculator.thejorgesierra.workers.dev/api/salaries';
+const IMAGE_PROXY  = 'https://hoopshype-rumors-api.thejorgesierra.workers.dev/api/image-proxy?url=';
+
+/* ----------------------------- CBA constants ------------------------------ */
+// (matches the trade machine — 2025-26 regular-season figures)
+const LEAGUE_MINIMUM = 1272870;
+
+/* ------------------------------- app state -------------------------------- */
+let players = [];                 // parsed player rows
+let teams = [];                   // unique team names
+// trade[0] / trade[1] mirror the trade machine's tradeTeams (2-team trade)
+const trade = [
+  { teamName: '', playersOut: [] },
+  { teamName: '', playersOut: [] }
+];
+
+/* =====================================================================
+   DATA PARSING  (column names wired to the real CSV headers used by the
+   trade machine's processCSVData: PLAYER, TEAM, 2026, ST 25-26, TEAM STATUS,
+   CAP SPACE, TAX ROOM, 1st APRON, 2nd APRON, HARD CAP 1st?/2nd?, NOT
+   AGGREGATED, POISON PILL, TRADE KICKER, NO TRADE, EXCEPTION, OTHER NOTES,
+   END, ST 26-27, 2027, HEADSHOT, LOGO, RESTRICTIONS, ...)
+   ===================================================================== */
+function parseSalary(s) {
+  if (!s && s !== 0) return 0;
+  return parseFloat(s.toString().replace(/[$,]/g, '')) || 0;
+}
+function formatSalary(num) {
+  if (!num) return '$0';
+  const abs = Math.abs(num);
+  const f = '$' + abs.toLocaleString('en-US', { maximumFractionDigits: 0 });
+  return num < 0 ? '-' + f : f;
+}
+
+function processCSVData(results) {
+  players = results.data
+    .filter(r => r.PLAYER && r.PLAYER.trim())
+    .filter(r => r.TEAM && r.TEAM.trim())
+    .map(r => {
+      const otherNotes = (r['OTHER NOTES'] || '').trim();
+      const contractStatus = (r['ST 25-26'] || '').trim();
+      const is10Day = contractStatus.toLowerCase().includes('10-day');
+      const contractEnd = (r['END'] || '').trim();
+      const status2627 = (r['ST 26-27'] || '').trim().toUpperCase();
+      const salary2627 = parseSalary(r['2027'] || 0);
+      const isExpiring = contractEnd === '2026' || (!salary2627 && !status2627);
+      const hasTeamOption = status2627.includes('TEAM OPT');
+      const hasPlayerOption = status2627.includes('PLAYER OPT');
+
+      let tradeAvailable = (r['RESTRICTIONS'] || '').trim();
+      if (is10Day) tradeAvailable = 'not available';
+      else if (isExpiring) tradeAvailable = 'not available';
+
+      const exception = (r['EXCEPTION'] || '').trim();
+      const headshot = (r['HEADSHOT'] || r['Headshot'] || r['PLAYER HEADSHOT'] || '').trim();
+
+      return {
+        player: (r.PLAYER || '').trim(),
+        team: (r.TEAM || '').trim(),
+        salary: parseSalary(r['2026'] || r['SALARY']),
+        contractStatus,
+        teamStatus: (r['TEAM STATUS'] || '').trim(),
+        capSpace: parseSalary(r['CAP SPACE'] || r['Cap Space'] || 0),
+        position: (r['POSITION'] || '').trim(),
+        contractEnd,
+        noTradeClause: (r['NO TRADE'] || '').toString().trim().toUpperCase() === 'YES',
+        notAggregated: (r['NOT AGGREGATED'] || '').toString().trim().toUpperCase() === 'NO',
+        poisonPill: parseSalary(r['POISON PILL'] || 0),
+        tradeKicker: parseFloat(r['TRADE KICKER'] || 0) || 0,
+        otherNotes,
+        exception,
+        isMinimum: otherNotes.toLowerCase().includes('minimum'),
+        isMinSalaryException: exception.toLowerCase().includes('minimum salary exception'),
+        is10Day,
+        taxRoom: parseSalary(r['TAX ROOM'] || 0),
+        apronRoom1st: parseSalary(r['1st APRON'] || 0),
+        apronRoom2nd: parseSalary(r['2nd APRON'] || 0),
+        isHardcap1st: (r['HARD CAP 1st?'] || '').toString().trim().toLowerCase().includes('hc'),
+        isHardcap2nd: (r['HARD CAP 2nd?'] || '').toString().trim().toLowerCase().includes('hc'),
+        unlikelyBonus: parseSalary(r['UNLIKELY BONUS'] || 0),
+        capHold: parseSalary(r['CH 25-26'] || r['CAP HOLD'] || 0),
+        tradeAvailable,
+        isExpiring,
+        hasTeamOption,
+        hasPlayerOption,
+        teamLogo: (r['LOGO'] || r['Logo'] || r['TEAM LOGO'] || r['Team Logo'] || '').trim(),
+        headshot
+      };
+    });
+
+  teams = Array.from(new Set(players.map(p => p.team))).sort();
+  onDataReady();
+}
+
+async function loadData() {
+  setStatus('Fetching live salaries…');
+  let csvText;
+  try {
+    const res = await fetch(SALARIES_URL, { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    csvText = await res.text();
+  } catch (e) {
+    setStatus('');
+    document.getElementById('teamPickers').textContent =
+      'Could not fetch live salary data (' + e.message + '). Check your network / the worker URL.';
+    return;
+  }
+  Papa.parse(csvText, {
+    header: true,
+    skipEmptyLines: true,
+    complete: processCSVData,
+    error: () => {
+      document.getElementById('teamPickers').textContent = 'Error parsing salary CSV.';
+    }
+  });
+}
+
+/* =====================================================================
+   CBA SALARY-MATCHING ENGINE  (replicated from the trade machine)
+   ===================================================================== */
+function getTeamInfo(teamName) {
+  const tp = players.find(p => p.team === teamName);
+  if (!tp) return null;
+  return {
+    name: teamName,
+    status: tp.teamStatus || 'Below Tax',
+    capSpace: tp.capSpace,
+    taxRoom: tp.taxRoom,
+    apronRoom1st: tp.apronRoom1st,
+    apronRoom2nd: tp.apronRoom2nd,
+    isHardcap1st: tp.isHardcap1st,
+    isHardcap2nd: tp.isHardcap2nd,
+    logo: tp.teamLogo
+  };
+}
+
+// Outgoing salary: two-way counts as $0, otherwise full salary
+function getOutgoingSalary(p) {
+  if (p.contractStatus && p.contractStatus.toUpperCase().includes('TWO-WAY')) return 0;
+  return p.salary;
+}
+// Incoming salary for MATCHING: two-way $0, MSE $0, poison pill value, minimum -> league min, else salary
+function getIncomingSalary(p) {
+  if (p.contractStatus && p.contractStatus.toUpperCase().includes('TWO-WAY')) return 0;
+  if (p.isMinSalaryException) return 0;
+  if (p.poisonPill > 0) return p.poisonPill;
+  if (p.isMinimum) return LEAGUE_MINIMUM;
+  return p.salary;
+}
+// Cap impact (Net): two-way $0, minimum uses cap hold if present, else actual salary (MSE counts full)
+function getCapImpactSalary(p) {
+  if (p.contractStatus && p.contractStatus.toUpperCase().includes('TWO-WAY')) return 0;
+  if (p.isMinimum && p.capHold > 0) return p.capHold;
+  return p.salary;
+}
+
+// Validate one team's side. Returns rich object incl. maxIncoming for the meter.
+// playersIn for a 2-team trade is the other team's playersOut.
+function validateTeamTrade(teamName, playersOut, playersIn) {
+  const teamInfo = getTeamInfo(teamName);
+  if (!teamInfo) return { valid: false, message: 'Team not found', maxIncoming: 0, incoming: 0, outgoing: 0 };
+
+  const outgoingSalary    = playersOut.reduce((s, p) => s + getOutgoingSalary(p), 0);
+  const incomingSalary    = playersIn.reduce((s, p) => s + getIncomingSalary(p), 0);
+  const incomingCapImpact = playersIn.reduce((s, p) => s + getCapImpactSalary(p), 0);
+
+  const outgoingUnlikely = playersOut.reduce((s, p) => s + (p.unlikelyBonus || 0), 0);
+  const incomingUnlikely = playersIn.reduce((s, p) => s + (p.unlikelyBonus || 0), 0);
+  const netUnlikely = incomingUnlikely - outgoingUnlikely;
+  const netIncomingForHardcap = incomingCapImpact - outgoingSalary + netUnlikely;
+
+  const fail = (m) => ({ valid: false, message: m, maxIncoming: 0, incoming: incomingSalary, outgoing: outgoingSalary });
+
+  // --- hardcap checks first (TPE can't help) ---
+  if (teamInfo.isHardcap1st && netIncomingForHardcap > teamInfo.apronRoom1st)
+    return fail(`Exceeds 1st apron hardcap by ${formatSalary(netIncomingForHardcap - teamInfo.apronRoom1st)}`);
+  if (teamInfo.isHardcap2nd && netIncomingForHardcap > teamInfo.apronRoom2nd)
+    return fail(`Exceeds 2nd apron hardcap by ${formatSalary(netIncomingForHardcap - teamInfo.apronRoom2nd)}`);
+
+  const status = (teamInfo.status || '').toUpperCase();
+
+  // --- tier-crossing checks (must satisfy the rule of each tier crossed) ---
+  if (status === 'BELOW TAX') {
+    if (teamInfo.taxRoom > 0 && netIncomingForHardcap > teamInfo.taxRoom) {
+      if (incomingSalary > outgoingSalary * 1.25 + 100000)
+        return fail(`Salaries don't match — ${teamName} must send more (crosses tax line)`);
+    }
+    if (teamInfo.apronRoom1st > 0 && netIncomingForHardcap > teamInfo.apronRoom1st) {
+      if (incomingSalary > outgoingSalary || incomingCapImpact > outgoingSalary)
+        return fail(`Salaries don't match — ${teamName} must send more (crosses 1st apron)`);
+    }
+    if (teamInfo.apronRoom2nd > 0 && netIncomingForHardcap > teamInfo.apronRoom2nd) {
+      if (incomingSalary > outgoingSalary || incomingCapImpact > outgoingSalary)
+        return fail(`Salaries don't match — ${teamName} must send more (crosses 2nd apron)`);
+    }
+  } else if (status === 'TAX TEAM') {
+    if (teamInfo.apronRoom1st > 0 && netIncomingForHardcap > teamInfo.apronRoom1st) {
+      if (incomingSalary > outgoingSalary || incomingCapImpact > outgoingSalary)
+        return fail(`Salaries don't match — ${teamName} must send more (crosses 1st apron)`);
+    }
+    if (teamInfo.apronRoom2nd > 0 && netIncomingForHardcap > teamInfo.apronRoom2nd) {
+      if (incomingSalary > outgoingSalary || incomingCapImpact > outgoingSalary)
+        return fail(`Salaries don't match — ${teamName} must send more (crosses 2nd apron)`);
+    }
+  } else if (status === '1ST APRON') {
+    if (teamInfo.apronRoom2nd > 0 && netIncomingForHardcap > teamInfo.apronRoom2nd) {
+      if (incomingSalary > outgoingSalary || incomingCapImpact > outgoingSalary)
+        return fail(`Salaries don't match — ${teamName} must send more (crosses 2nd apron)`);
+    }
+  }
+
+  // --- effective status (where the team ends up after the trade) ---
+  let eff = status;
+  if (status === 'BELOW TAX') {
+    if (teamInfo.apronRoom2nd > 0 && netIncomingForHardcap > teamInfo.apronRoom2nd) eff = '2ND APRON';
+    else if (teamInfo.apronRoom1st > 0 && netIncomingForHardcap > teamInfo.apronRoom1st) eff = '1ST APRON';
+    else if (teamInfo.taxRoom > 0 && netIncomingForHardcap > teamInfo.taxRoom) eff = 'TAX TEAM';
+  } else if (status === 'TAX TEAM') {
+    if (teamInfo.apronRoom2nd > 0 && netIncomingForHardcap > teamInfo.apronRoom2nd) eff = '2ND APRON';
+    else if (teamInfo.apronRoom1st > 0 && netIncomingForHardcap > teamInfo.apronRoom1st) eff = '1ST APRON';
+  } else if (status === '1ST APRON') {
+    if (teamInfo.apronRoom2nd > 0 && netIncomingForHardcap > teamInfo.apronRoom2nd) eff = '2ND APRON';
+  }
+
+  // --- max incoming by effective tier (2024-25 CBA brackets) ---
+  let maxIncoming;
+  if (eff === 'CAP SPACE') {
+    maxIncoming = teamInfo.capSpace + outgoingSalary;
+  } else if (eff === '2ND APRON' || eff === '1ST APRON') {
+    maxIncoming = outgoingSalary;                          // 100%
+  } else if (eff === 'TAX TEAM') {
+    maxIncoming = outgoingSalary * 1.25 + 100000;          // 125% + $100K
+  } else {                                                  // Below Tax, tiered
+    if (outgoingSalary <= 7500000)      maxIncoming = outgoingSalary * 2 + 250000;
+    else if (outgoingSalary <= 29000000) maxIncoming = outgoingSalary + 7500000;
+    else                                maxIncoming = outgoingSalary * 1.25 + 250000;
+  }
+
+  if (incomingSalary > maxIncoming) {
+    const deficit = incomingSalary - maxIncoming;
+    return {
+      valid: false,
+      message: `${teamName} needs to send out ${formatSalary(deficit)} more in salary`,
+      maxIncoming, incoming: incomingSalary, outgoing: outgoingSalary
+    };
+  }
+  if ((eff === '1ST APRON' || eff === '2ND APRON') && incomingCapImpact > outgoingSalary) {
+    return fail(`Salaries don't match — ${teamName} needs to send out ${formatSalary(incomingCapImpact - outgoingSalary)} more salary`);
+  }
+
+  // --- non-fatal restrictions (warnings) + aggregation rule ---
+  const restrictions = [];
+  const naPlayers = playersOut.filter(p => p.notAggregated);
+  // Without a TPE to absorb them, NA players can't be aggregated in a multi-player package.
+  if (naPlayers.length > 0 && playersOut.length > 1) {
+    return {
+      valid: false,
+      message: `${naPlayers.map(p => p.player).join(', ')} cannot be aggregated with other players`,
+      maxIncoming, incoming: incomingSalary, outgoing: outgoingSalary
+    };
+  }
+  playersOut.forEach(p => {
+    if (p.isExpiring) restrictions.push(`${p.player} has an expiring contract (not tradeable)`);
+    else if ((p.tradeAvailable || '').toLowerCase() === 'not available') restrictions.push(`${p.player} cannot be traded`);
+    else if (p.tradeAvailable) restrictions.push(`${p.player} available ${p.tradeAvailable}`);
+    if (p.hasTeamOption) restrictions.push(`${p.player} has a Team Option`);
+    if (p.hasPlayerOption) restrictions.push(`${p.player} has a Player Option`);
+    if (p.noTradeClause) restrictions.push(`${p.player} has a no-trade clause`);
+  });
+
+  return {
+    valid: true,
+    message: restrictions.length ? restrictions.join('; ') : 'Salaries match',
+    warnings: restrictions,
+    maxIncoming, incoming: incomingSalary, outgoing: outgoingSalary
+  };
+}
+
+// Evaluate the full 2-team trade.
+function evaluateTrade() {
+  const a = trade[0], b = trade[1];
+  const A = validateTeamTrade(a.teamName, a.playersOut, b.playersOut);
+  const B = validateTeamTrade(b.teamName, b.playersOut, a.playersOut);
+  const works = A.valid && B.valid;
+  let reason;
+  if (works) {
+    // binding side = whichever uses more of its allowance
+    const ra = A.maxIncoming ? A.incoming / A.maxIncoming : 0;
+    const rb = B.maxIncoming ? B.incoming / B.maxIncoming : 0;
+    const tight = ra >= rb ? a.teamName : b.teamName;
+    reason = `Salaries match within ${tight}'s allowance`;
+    const warn = [...(A.warnings || []), ...(B.warnings || [])];
+    if (warn.length) reason = warn[0];
+  } else {
+    reason = !A.valid ? A.message : B.message;
+  }
+  return { works, reason, A, B };
+}
+
+/* =====================================================================
+   IMAGE LOADING  (always via proxy, crossOrigin=anonymous so the canvas
+   is NOT tainted and MediaRecorder/toDataURL keep working)
+   ===================================================================== */
+const imageCache = new Map();
+function proxied(url) { return IMAGE_PROXY + encodeURIComponent(url); }
+function loadImage(url) {
+  if (!url) return Promise.resolve(null);
+  if (imageCache.has(url)) return Promise.resolve(imageCache.get(url));
+  return new Promise(resolve => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';          // <-- critical: keeps canvas untainted
+    img.onload = () => { imageCache.set(url, img); resolve(img); };
+    img.onerror = () => { imageCache.set(url, null); resolve(null); };
+    img.src = proxied(url);
+  });
+}
+async function preloadTradeImages() {
+  const urls = new Set();
+  trade.forEach(t => {
+    const info = getTeamInfo(t.teamName);
+    if (info && info.logo) urls.add(info.logo);
+    t.playersOut.forEach(p => { if (p.headshot) urls.add(p.headshot); });
+  });
+  await Promise.all([...urls].map(loadImage));
+}
+
+/* =====================================================================
+   LAYOUT  (one coordinate map per aspect ratio)
+   ===================================================================== */
+function getLayout(aspect) {
+  if (aspect === '1:1') {
+    return {
+      aspect, W: 1080, H: 1080,
+      titleY: 70,
+      // Team A left, Team B right, meter across the bottom
+      regions: [
+        { x: 40,  y: 150, w: 480, h: 700, from: 'left',  vertical: true },
+        { x: 560, y: 150, w: 480, h: 700, from: 'right', vertical: true }
+      ],
+      meter: { x: 80, y: 900, w: 920, h: 120 }
+    };
+  }
+  // default 9:16
+  return {
+    aspect: '9:16', W: 1080, H: 1920,
+    titleY: 120,
+    // Team A top, Team B bottom, meter in the center
+    regions: [
+      { x: 50, y: 230,  w: 980, h: 560, from: 'left',  vertical: false },
+      { x: 50, y: 1130, w: 980, h: 560, from: 'right', vertical: false }
+    ],
+    meter: { x: 90, y: 850, w: 900, h: 200 }
+  };
+}
+
+/* =====================================================================
+   TIMELINE  (~9s; quizMode inserts a freeze gate between beats 2 and 3)
+   ===================================================================== */
+function buildTimeline(quizMode) {
+  const phases = [
+    { key: 'hook',   dur: 1.5 },   // 1. "Would you do this trade?" + team marks
+    { key: 'teamA',  dur: 1.5 }    // 2. Team A outgoing assets slide in / tally
+  ];
+  if (quizMode) phases.push({ key: 'gate', dur: 2.0 });  // freeze gate
+  phases.push({ key: 'teamB',   dur: 1.5 });             // 3. Team B assets slide in
+  phases.push({ key: 'meter',   dur: 2.0 });             // 4. meter fills, $ count up
+  phases.push({ key: 'verdict', dur: 1.5 });             // 5. WORKS / DOESN'T WORK
+  phases.push({ key: 'end',     dur: 1.0 });             // 6. poll / CTA end card
+
+  let t = 0;
+  const win = {};
+  phases.forEach(p => { win[p.key] = { s: t, e: t + p.dur }; t += p.dur; });
+  return { win, total: t, hasGate: !!quizMode };
+}
+
+/* ------------------------------ easing ------------------------------ */
+const clamp01 = v => Math.max(0, Math.min(1, v));
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+const lerp = (a, b, t) => a + (b - a) * t;
+
+/* =====================================================================
+   CANVAS DRAWING
+   ===================================================================== */
+const canvas = document.getElementById('stageCanvas');
+const ctx = canvas.getContext('2d');
+
+function roundRect(c, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+function fitFont(c, text, maxW, baseSize, weight, family) {
+  let size = baseSize;
+  family = family || 'sans-serif';
+  do {
+    c.font = `${weight} ${size}px ${family}`;
+    if (c.measureText(text).width <= maxW || size <= 11) break;
+    size -= 1;
+  } while (true);
+  return size;
+}
+function drawCircleImage(c, img, cx, cy, r, fallbackText, accent) {
+  c.save();
+  c.beginPath();
+  c.arc(cx, cy, r, 0, Math.PI * 2);
+  c.closePath();
+  c.fillStyle = '#0e1420';
+  c.fill();
+  c.clip();
+  if (img) {
+    const ar = img.width / img.height;
+    let dw = r * 2, dh = r * 2;
+    if (ar > 1) { dh = r * 2; dw = dh * ar; } else { dw = r * 2; dh = dw / ar; }
+    c.drawImage(img, cx - dw / 2, cy - dh / 2, dw, dh);
+  } else {
+    c.fillStyle = accent || '#26334a';
+    c.fillRect(cx - r, cy - r, r * 2, r * 2);
+    c.fillStyle = '#fff';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.font = `700 ${r * 0.8}px sans-serif`;
+    c.fillText((fallbackText || '?').slice(0, 2).toUpperCase(), cx, cy);
+  }
+  c.restore();
+  c.beginPath();
+  c.arc(cx, cy, r, 0, Math.PI * 2);
+  c.lineWidth = 4;
+  c.strokeStyle = accent || '#4f8cff';
+  c.stroke();
+}
+
+const TEAM_ACCENT = ['#3b82f6', '#ef4444']; // Team A blue, Team B red
+
+// Draw one team's outgoing assets inside its region.
+function drawTeamAssets(c, region, team, accent, revealP, layout) {
+  const list = team.playersOut;
+  if (!list.length) return;
+  const ease = easeOutCubic(clamp01(revealP));
+  const headerH = 64;
+  const innerY = region.y + headerH;
+  const innerH = region.h - headerH;
+
+  if (region.vertical) {
+    // stack players vertically (narrow tall region, e.g. 1:1)
+    const rowH = Math.min(innerH / list.length, 150);
+    list.forEach((p, i) => {
+      // staggered reveal
+      const local = clamp01((ease * list.length) - i);
+      if (local <= 0) return;
+      const slideX = (region.from === 'left' ? -1 : 1) * (1 - easeOutCubic(local)) * 220;
+      const cy = innerY + rowH * i + rowH / 2;
+      const r = Math.min(rowH * 0.36, 52);
+      const cx = region.x + r + 16 + slideX;
+      c.globalAlpha = local;
+      drawCircleImage(c, imageCache.get(p.headshot) || null, cx, cy, r, p.player, accent);
+      // name + salary
+      c.globalAlpha = local;
+      c.textAlign = 'left';
+      c.textBaseline = 'middle';
+      c.fillStyle = '#fff';
+      const tx = cx + r + 18;
+      const fs = fitFont(c, p.player, region.x + region.w - tx - 10, 30, 700);
+      c.font = `700 ${fs}px sans-serif`;
+      c.fillText(p.player, tx, cy - 14);
+      c.fillStyle = '#cfe0ff';
+      c.font = '600 24px sans-serif';
+      c.fillText(formatSalary(getOutgoingSalary(p)), tx, cy + 18);
+      drawBadges(c, p, tx, cy + 40, local);
+      c.globalAlpha = 1;
+    });
+  } else {
+    // horizontal row (wide short region, e.g. 9:16 blocks)
+    const n = list.length;
+    const colW = Math.min(region.w / n, 300);
+    const startX = region.x + (region.w - colW * n) / 2;
+    list.forEach((p, i) => {
+      const local = clamp01((ease * n) - i);
+      if (local <= 0) return;
+      const slideX = (region.from === 'left' ? -1 : 1) * (1 - easeOutCubic(local)) * 260;
+      const cx = startX + colW * i + colW / 2 + slideX;
+      const r = Math.min(colW * 0.32, 92);
+      const cy = innerY + r + 18;
+      c.globalAlpha = local;
+      drawCircleImage(c, imageCache.get(p.headshot) || null, cx, cy, r, p.player, accent);
+      c.textAlign = 'center';
+      c.textBaseline = 'top';
+      c.fillStyle = '#fff';
+      const fs = fitFont(c, p.player, colW - 12, 30, 700);
+      c.font = `700 ${fs}px sans-serif`;
+      c.fillText(p.player, cx, cy + r + 12);
+      c.fillStyle = '#cfe0ff';
+      c.font = '600 26px sans-serif';
+      c.fillText(formatSalary(getOutgoingSalary(p)), cx, cy + r + 12 + fs + 8);
+      drawBadgesCentered(c, p, cx, cy + r + 12 + fs + 8 + 34, local);
+      c.globalAlpha = 1;
+    });
+  }
+}
+
+function playerBadges(p) {
+  const b = [];
+  if (p.contractStatus && p.contractStatus.toUpperCase().includes('TWO-WAY')) b.push(['TW', '#1d4ed8']);
+  if (p.is10Day) b.push(['10D', '#dc2626']);
+  if (p.noTradeClause) b.push(['NTC', '#b45309']);
+  if (p.notAggregated) b.push(['NA', '#be185d']);
+  if (p.poisonPill > 0) b.push(['PP', '#7c3aed']);
+  if (p.tradeKicker > 0) b.push(['TK', '#059669']);
+  if (p.isMinSalaryException) b.push(['MSE', '#0284c7']);
+  return b;
+}
+function drawBadges(c, p, x, y, alpha) {
+  const badges = playerBadges(p);
+  c.globalAlpha = alpha;
+  c.textAlign = 'left';
+  c.textBaseline = 'middle';
+  c.font = '700 16px sans-serif';
+  let bx = x;
+  badges.forEach(([t, col]) => {
+    const w = c.measureText(t).width + 14;
+    c.fillStyle = col;
+    roundRect(c, bx, y - 12, w, 24, 6); c.fill();
+    c.fillStyle = '#fff';
+    c.fillText(t, bx + 7, y);
+    bx += w + 6;
+  });
+  c.globalAlpha = 1;
+}
+function drawBadgesCentered(c, p, cx, y, alpha) {
+  const badges = playerBadges(p);
+  if (!badges.length) return;
+  c.font = '700 16px sans-serif';
+  const widths = badges.map(([t]) => c.measureText(t).width + 14);
+  const total = widths.reduce((s, w) => s + w + 6, -6);
+  let bx = cx - total / 2;
+  c.globalAlpha = alpha;
+  c.textAlign = 'left';
+  c.textBaseline = 'middle';
+  badges.forEach(([t, col], i) => {
+    const w = widths[i];
+    c.fillStyle = col;
+    roundRect(c, bx, y - 12, w, 24, 6); c.fill();
+    c.fillStyle = '#fff';
+    c.fillText(t, bx + 7, y);
+    bx += w + 6;
+  });
+  c.globalAlpha = 1;
+}
+
+// team header (logo, name, status, running outgoing $)
+function drawTeamHeader(c, region, team, accent, dollarsShown) {
+  const info = getTeamInfo(team.teamName);
+  const y = region.y;
+  c.save();
+  // accent stripe
+  c.fillStyle = accent;
+  roundRect(c, region.x, y, region.w, 56, 12); c.fill();
+  // logo
+  const logo = info && info.logo ? imageCache.get(info.logo) : null;
+  let tx = region.x + 16;
+  if (logo) { c.drawImage(logo, region.x + 12, y + 8, 40, 40); tx = region.x + 62; }
+  c.fillStyle = '#fff';
+  c.textBaseline = 'middle';
+  c.textAlign = 'left';
+  const fs = fitFont(c, team.teamName, region.w - 280, 32, 800);
+  c.font = `800 ${fs}px sans-serif`;
+  c.fillText(team.teamName, tx, y + 28);
+  // running outgoing dollars (right)
+  c.textAlign = 'right';
+  c.font = '800 30px sans-serif';
+  c.fillText(formatSalary(Math.round(dollarsShown)), region.x + region.w - 16, y + 28);
+  c.restore();
+}
+
+// salary-match meter
+function drawMeter(c, m, evalRes, fillP, countP, layout) {
+  // binding side ratio drives the fill
+  const A = evalRes.A, B = evalRes.B;
+  const ra = A.maxIncoming ? A.incoming / A.maxIncoming : 0;
+  const rb = B.maxIncoming ? B.incoming / B.maxIncoming : 0;
+  const ratio = Math.max(ra, rb);
+  const targetFrac = clamp01(Math.min(ratio, 1)); // bar fills to allowance
+  const over = ratio > 1.0001;
+  const frac = targetFrac * easeOutCubic(clamp01(fillP));
+  const col = over ? '#ef4444' : '#22c55e';
+
+  // label
+  c.textAlign = 'center';
+  c.textBaseline = 'alphabetic';
+  c.fillStyle = '#9fb2cf';
+  c.font = '700 26px sans-serif';
+  c.fillText('SALARY MATCH', m.x + m.w / 2, m.y - 16);
+
+  // track
+  const barH = Math.min(48, m.h * 0.4);
+  const barY = m.y + (m.h - barH) / 2;
+  c.fillStyle = '#1b2433';
+  roundRect(c, m.x, barY, m.w, barH, barH / 2); c.fill();
+  // 100% marker
+  c.strokeStyle = 'rgba(255,255,255,.25)';
+  c.lineWidth = 3;
+  c.setLineDash([6, 6]);
+  c.beginPath(); c.moveTo(m.x + m.w, barY - 8); c.lineTo(m.x + m.w, barY + barH + 8); c.stroke();
+  c.setLineDash([]);
+  // fill
+  c.fillStyle = col;
+  roundRect(c, m.x, barY, Math.max(barH, m.w * frac), barH, barH / 2); c.fill();
+
+  // counting dollar figures (Team A out vs Team B out)
+  const aOut = A.outgoing * clamp01(countP);
+  const bOut = B.outgoing * clamp01(countP);
+  c.fillStyle = '#cfe0ff';
+  c.font = '700 26px sans-serif';
+  c.textAlign = 'left';
+  c.fillText(formatSalary(Math.round(aOut)), m.x, barY + barH + 34);
+  c.textAlign = 'right';
+  c.fillText(formatSalary(Math.round(bOut)), m.x + m.w, barY + barH + 34);
+}
+
+// verdict stamp
+function drawVerdict(c, layout, evalRes, p) {
+  const works = evalRes.works;
+  const scale = easeOutBack(clamp01(p));
+  const cx = layout.W / 2;
+  const cy = layout.aspect === '1:1' ? layout.H * 0.46 : layout.H * 0.5;
+  const text = works ? 'WORKS' : "DOESN'T WORK";
+  const col = works ? '#22c55e' : '#ef4444';
+  c.save();
+  c.translate(cx, cy);
+  c.rotate(-0.12);
+  c.scale(scale, scale);
+  c.globalAlpha = clamp01(p * 1.4);
+  c.font = `900 ${layout.aspect === '1:1' ? 96 : 120}px sans-serif`;
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  const w = c.measureText(text).width + 80;
+  const h = (layout.aspect === '1:1' ? 96 : 120) + 50;
+  c.lineWidth = 10;
+  c.strokeStyle = col;
+  roundRect(c, -w / 2, -h / 2, w, h, 18); c.stroke();
+  c.fillStyle = 'rgba(11,15,23,.55)';
+  roundRect(c, -w / 2, -h / 2, w, h, 18); c.fill();
+  c.fillStyle = col;
+  c.fillText(text, 0, 6);
+  c.restore();
+  // one-line reason below stamp
+  c.globalAlpha = clamp01((p - 0.3) * 2);
+  c.fillStyle = '#e8edf5';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  const ry = cy + h / 2 + 50;
+  const rfs = fitFont(c, evalRes.reason, layout.W - 120, 34, 600);
+  c.font = `600 ${rfs}px sans-serif`;
+  c.fillText(evalRes.reason, cx, cy + (layout.aspect === '1:1' ? 100 : 120));
+  c.globalAlpha = 1;
+}
+
+// master frame renderer
+function drawFrame(elapsed, ctxArg) {
+  const c = ctxArg || ctx;
+  const layout = currentRender.layout;
+  const tl = currentRender.timeline;
+  const evalRes = currentRender.eval;
+  const win = tl.win;
+
+  // background
+  const g = c.createLinearGradient(0, 0, 0, layout.H);
+  g.addColorStop(0, '#0c1320');
+  g.addColorStop(1, '#070b12');
+  c.fillStyle = g;
+  c.fillRect(0, 0, layout.W, layout.H);
+
+  // ---- persistent layout (after the hook) ----
+  const afterHook = elapsed >= win.hook.e - 0.3;
+  const layoutAlpha = clamp01((elapsed - (win.hook.e - 0.3)) / 0.4);
+
+  if (afterHook) {
+    c.globalAlpha = layoutAlpha;
+
+    // title
+    c.fillStyle = '#fff';
+    c.textAlign = 'center';
+    c.textBaseline = 'middle';
+    c.font = '800 40px sans-serif';
+    c.fillText('Would you do this trade?', layout.W / 2, layout.titleY);
+
+    // team A
+    const aReveal = clamp01((elapsed - win.teamA.s) / (win.teamA.e - win.teamA.s));
+    drawTeamHeader(c, layout.regions[0], trade[0], TEAM_ACCENT[0], currentRender.eval.A.outgoing * aReveal);
+    drawTeamAssets(c, layout.regions[0], trade[0], TEAM_ACCENT[0], aReveal, layout);
+
+    // team B (hidden until its phase / after gate)
+    const bReveal = clamp01((elapsed - win.teamB.s) / (win.teamB.e - win.teamB.s));
+    drawTeamHeader(c, layout.regions[1], trade[1], TEAM_ACCENT[1], currentRender.eval.B.outgoing * bReveal);
+    if (elapsed >= win.teamB.s) drawTeamAssets(c, layout.regions[1], trade[1], TEAM_ACCENT[1], bReveal, layout);
+
+    // meter
+    const fillP = (elapsed - win.meter.s) / (win.meter.e - win.meter.s);
+    const countP = elapsed < win.meter.s ? 0 : (elapsed - win.meter.s) / (win.meter.e - win.meter.s);
+    drawMeter(c, layout.meter, evalRes, fillP, countP, layout);
+
+    c.globalAlpha = 1;
+  }
+
+  // ---- hook overlay (beat 1) ----
+  if (elapsed < win.hook.e) {
+    const a = elapsed < 0.3 ? elapsed / 0.3
+            : elapsed > win.hook.e - 0.3 ? clamp01((win.hook.e - elapsed) / 0.3) : 1;
+    drawHook(c, layout, a);
+  }
+
+  // ---- quiz gate freeze (between beat 2 and 3) ----
+  if (tl.hasGate && elapsed >= win.gate.s && elapsed < win.gate.e) {
+    drawGate(c, layout, elapsed - win.gate.s, win.gate.e - win.gate.s);
+  }
+
+  // ---- verdict stamp (beat 5) ----
+  if (elapsed >= win.verdict.s) {
+    const p = clamp01((elapsed - win.verdict.s) / 0.6);
+    drawVerdict(c, layout, evalRes, p);
+  }
+
+  // ---- end card (beat 6) ----
+  if (elapsed >= win.end.s) {
+    const a = clamp01((elapsed - win.end.s) / 0.4);
+    drawEndCard(c, layout, a);
+  }
+}
+
+function drawHook(c, layout, alpha) {
+  c.save();
+  c.globalAlpha = alpha;
+  c.fillStyle = 'rgba(7,11,18,.96)';
+  c.fillRect(0, 0, layout.W, layout.H);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  const big = fitFont(c, 'Would you do', layout.W - 120, 88, 900);
+  c.font = `900 ${big}px sans-serif`;
+  c.fillText('Would you do', layout.W / 2, layout.H * 0.3);
+  c.fillText('this trade?', layout.W / 2, layout.H * 0.3 + big * 1.05);
+
+  // team marks (logos + VS)
+  const cy = layout.H * 0.56;
+  const r = 90;
+  const gap = 120;
+  const a = getTeamInfo(trade[0].teamName);
+  const b = getTeamInfo(trade[1].teamName);
+  drawCircleImage(c, a && a.logo ? imageCache.get(a.logo) : null, layout.W / 2 - gap - r, cy, r,
+    trade[0].teamName, TEAM_ACCENT[0]);
+  drawCircleImage(c, b && b.logo ? imageCache.get(b.logo) : null, layout.W / 2 + gap + r, cy, r,
+    trade[1].teamName, TEAM_ACCENT[1]);
+  c.fillStyle = '#fff';
+  c.font = '900 72px sans-serif';
+  c.fillText('VS', layout.W / 2, cy);
+  // team names
+  c.font = '700 28px sans-serif';
+  c.fillStyle = '#cfe0ff';
+  c.fillText(trade[0].teamName, layout.W / 2 - gap - r, cy + r + 40);
+  c.fillText(trade[1].teamName, layout.W / 2 + gap + r, cy + r + 40);
+  c.restore();
+}
+
+function drawGate(c, layout, t, dur) {
+  const a = t < 0.3 ? t / 0.3 : t > dur - 0.3 ? clamp01((dur - t) / 0.3) : 1;
+  c.save();
+  c.globalAlpha = a * 0.9;
+  c.fillStyle = 'rgba(7,11,18,.9)';
+  c.fillRect(0, 0, layout.W, layout.H);
+  c.globalAlpha = a;
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  const pulse = 1 + Math.sin(t * 4) * 0.03;
+  c.translate(layout.W / 2, layout.H * 0.45);
+  c.scale(pulse, pulse);
+  const line1 = 'What does';
+  const line2 = `${trade[1].teamName}`;
+  const line3 = 'need to send?';
+  c.font = '800 56px sans-serif';
+  c.fillText(line1, 0, -90);
+  const fs = fitFont(c, line2, layout.W - 140, 72, 900);
+  c.fillStyle = TEAM_ACCENT[1];
+  c.font = `900 ${fs}px sans-serif`;
+  c.fillText(line2, 0, 0);
+  c.fillStyle = '#fff';
+  c.font = '800 56px sans-serif';
+  c.fillText(line3, 0, 90);
+  c.font = '600 30px sans-serif';
+  c.fillStyle = '#8896ac';
+  c.fillText('🤔  think…', 0, 180);
+  c.restore();
+}
+
+function drawEndCard(c, layout, alpha) {
+  c.save();
+  c.globalAlpha = alpha;
+  c.fillStyle = 'rgba(7,11,18,.92)';
+  c.fillRect(0, 0, layout.W, layout.H);
+  c.fillStyle = '#fff';
+  c.textAlign = 'center';
+  c.textBaseline = 'middle';
+  c.font = '900 76px sans-serif';
+  c.fillText('YOUR CALL', layout.W / 2, layout.H * 0.34);
+  // poll prompt
+  const by = layout.H * 0.5;
+  const bw = layout.W * 0.62, bh = 110, gap = 40;
+  c.fillStyle = '#22c55e';
+  roundRect(c, layout.W / 2 - bw / 2, by, bw, bh, 18); c.fill();
+  c.fillStyle = '#ef4444';
+  roundRect(c, layout.W / 2 - bw / 2, by + bh + gap, bw, bh, 18); c.fill();
+  c.fillStyle = '#fff';
+  c.font = '800 44px sans-serif';
+  c.fillText('👍  DO IT', layout.W / 2, by + bh / 2);
+  c.fillText('👎  PASS', layout.W / 2, by + bh + gap + bh / 2);
+  c.font = '600 32px sans-serif';
+  c.fillStyle = '#8896ac';
+  c.fillText('Vote in the comments 👇', layout.W / 2, by + 2 * bh + 2 * gap + 30);
+  c.restore();
+}
+
+/* =====================================================================
+   RENDER / RECORD ORCHESTRATION
+   ===================================================================== */
+let currentRender = { layout: getLayout('9:16'), timeline: buildTimeline(false), eval: null };
+let animating = false;
+
+function getAspect() {
+  const el = document.querySelector('#aspectSeg button.active');
+  return el ? el.dataset.aspect : '9:16';
+}
+
+function prepareRender() {
+  const aspect = getAspect();
+  const quiz = document.getElementById('quizMode').checked;
+  const layout = getLayout(aspect);
+  canvas.width = layout.W;
+  canvas.height = layout.H;
+  currentRender = { layout, timeline: buildTimeline(quiz), eval: evaluateTrade() };
+  return currentRender;
+}
+
+function validTradeSelected() {
+  return trade[0].teamName && trade[1].teamName &&
+    (trade[0].playersOut.length > 0 || trade[1].playersOut.length > 0);
+}
+
+function runAnimation(record) {
+  return new Promise(async (resolve, reject) => {
+    if (animating) return resolve();
+    animating = true;
+    await preloadTradeImages();
+    const r = prepareRender();
+    const total = r.timeline.total;
+
+    let recorder = null, chunks = [];
+    if (record) {
+      const stream = canvas.captureStream(30);
+      let mime = '';
+      for (const m of ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']) {
+        if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) { mime = m; break; }
+      }
+      try {
+        recorder = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : undefined);
+      } catch (e) { animating = false; return reject(e); }
+      recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: 'video/webm' });
+        const url = URL.createObjectURL(blob);
+        const v = document.getElementById('out');
+        v.src = url; v.style.display = 'block';
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `trade-${getAspect().replace(':', 'x')}.webm`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setStatus('Saved ' + a.download + ' — verify it plays above.');
+        animating = false;
+        resolve();
+      };
+      recorder.start();
+    }
+
+    const start = performance.now();
+    function frame(now) {
+      let elapsed = (now - start) / 1000;
+      if (elapsed >= total) elapsed = total;
+      drawFrame(elapsed);
+      if (elapsed < total) {
+        requestAnimationFrame(frame);
+      } else {
+        // hold the final frame briefly so the recording ends cleanly
+        setTimeout(() => {
+          if (recorder) recorder.stop();
+          else { animating = false; resolve(); }
+        }, 250);
+      }
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+/* =====================================================================
+   BUILDER UI
+   ===================================================================== */
+function setStatus(t) { document.getElementById('status').textContent = t; }
+
+function onDataReady() {
+  setStatus(`Loaded ${players.length} players across ${teams.length} teams.`);
+  renderTeamPickers();
+}
+
+function renderTeamPickers() {
+  const wrap = document.getElementById('teamPickers');
+  const opts = ['<option value="">— select —</option>']
+    .concat(teams.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`))
+    .join('');
+  wrap.innerHTML = `
+    <label>Team A</label>
+    <select id="teamA">${opts}</select>
+    <label style="margin-top:10px">Team B</label>
+    <select id="teamB">${opts}</select>`;
+  document.getElementById('teamA').addEventListener('change', e => { trade[0].teamName = e.target.value; trade[0].playersOut = []; renderBuilders(); renderStaticPreview(); });
+  document.getElementById('teamB').addEventListener('change', e => { trade[1].teamName = e.target.value; trade[1].playersOut = []; renderBuilders(); renderStaticPreview(); });
+  renderBuilders();
+}
+
+function renderBuilders() {
+  const wrap = document.getElementById('builders');
+  wrap.innerHTML = '';
+  trade.forEach((t, idx) => {
+    const block = document.createElement('div');
+    block.className = 'team-block';
+    if (!t.teamName) {
+      block.innerHTML = `<div class="tname">Team ${idx === 0 ? 'A' : 'B'}: <span style="color:var(--muted)">pick a team above</span></div>`;
+      wrap.appendChild(block);
+      return;
+    }
+    const info = getTeamInfo(t.teamName);
+    block.innerHTML = `
+      <div class="tname">
+        ${info && info.logo ? `<img src="${proxied(info.logo)}" crossorigin="anonymous" onerror="this.style.display='none'">` : ''}
+        ${escapeHtml(t.teamName)} <span style="color:var(--muted);font-weight:400">sends out →</span>
+      </div>
+      <input type="text" placeholder="Search ${escapeHtml(t.teamName)} players…" data-search="${idx}">
+      <div class="results" data-results="${idx}" style="display:none"></div>
+      <div class="chips" data-chips="${idx}"></div>
+      <div class="tally" data-tally="${idx}"></div>`;
+    wrap.appendChild(block);
+
+    const search = block.querySelector(`[data-search="${idx}"]`);
+    const results = block.querySelector(`[data-results="${idx}"]`);
+    search.addEventListener('input', () => renderResults(idx, search.value, results));
+    search.addEventListener('focus', () => renderResults(idx, search.value, results));
+    renderChips(idx);
+  });
+}
+
+function renderResults(idx, query, resultsEl) {
+  const teamName = trade[idx].teamName;
+  const q = query.trim().toLowerCase();
+  const chosen = new Set(trade[idx].playersOut.map(p => p.player));
+  const matches = players
+    .filter(p => p.team === teamName && !chosen.has(p.player))
+    .filter(p => !q || p.player.toLowerCase().includes(q))
+    .sort((a, b) => b.salary - a.salary)
+    .slice(0, 40);
+  if (!matches.length) { resultsEl.style.display = 'none'; return; }
+  resultsEl.style.display = 'block';
+  resultsEl.innerHTML = matches.map(p =>
+    `<div class="row" data-player="${escapeHtml(p.player)}">
+       <span>${escapeHtml(p.player)}</span>
+       <span class="sal">${formatSalary(getOutgoingSalary(p))}</span>
+     </div>`).join('');
+  resultsEl.querySelectorAll('.row').forEach(row => {
+    row.addEventListener('click', () => {
+      const p = players.find(pp => pp.team === teamName && pp.player === row.dataset.player);
+      if (p) {
+        trade[idx].playersOut.push(p);
+        renderChips(idx);
+        renderResults(idx, query, resultsEl);
+        renderStaticPreview();
+      }
+    });
+  });
+}
+
+function renderChips(idx) {
+  const chipsEl = document.querySelector(`[data-chips="${idx}"]`);
+  const tallyEl = document.querySelector(`[data-tally="${idx}"]`);
+  if (!chipsEl) return;
+  chipsEl.innerHTML = trade[idx].playersOut.map((p, i) =>
+    `<span class="chip"><b>${escapeHtml(p.player)}</b> ${formatSalary(getOutgoingSalary(p))}
+       <span class="x" data-rm="${i}">✕</span></span>`).join('');
+  chipsEl.querySelectorAll('[data-rm]').forEach(x => {
+    x.addEventListener('click', () => {
+      trade[idx].playersOut.splice(parseInt(x.dataset.rm), 1);
+      renderChips(idx);
+      renderStaticPreview();
+    });
+  });
+  const total = trade[idx].playersOut.reduce((s, p) => s + getOutgoingSalary(p), 0);
+  const info = getTeamInfo(trade[idx].teamName);
+  tallyEl.textContent = `Outgoing: ${formatSalary(total)}  ·  Status: ${info ? info.status : '—'}`;
+}
+
+// Static preview on the canvas (final revealed state with verdict) + verdict line.
+async function renderStaticPreview() {
+  const line = document.getElementById('verdictLine');
+  if (!validTradeSelected()) {
+    line.textContent = '';
+    line.className = '';
+    const layout = getLayout(getAspect());
+    canvas.width = layout.W; canvas.height = layout.H;
+    ctx.fillStyle = '#070b12'; ctx.fillRect(0, 0, layout.W, layout.H);
+    ctx.fillStyle = '#8896ac'; ctx.textAlign = 'center'; ctx.font = '600 36px sans-serif';
+    ctx.fillText('Pick two teams and add players', layout.W / 2, layout.H / 2);
+    return;
+  }
+  await preloadTradeImages();
+  const r = prepareRender();
+  const ev = r.eval;
+  line.textContent = (ev.works ? '✅ WORKS — ' : '❌ DOESN’T WORK — ') + ev.reason;
+  line.className = ev.works ? 'ok' : 'bad';
+  // draw the moment right before the end card (verdict visible, full reveal)
+  drawFrame(r.timeline.win.verdict.e - 0.01);
+}
+
+function escapeHtml(s) {
+  return (s || '').replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
+}
+
+/* ------------------------------- wiring ------------------------------- */
+document.querySelectorAll('#aspectSeg button').forEach(b => {
+  b.addEventListener('click', () => {
+    document.querySelectorAll('#aspectSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    renderStaticPreview();
+  });
+});
+document.getElementById('quizMode').addEventListener('change', renderStaticPreview);
+
+document.getElementById('previewBtn').addEventListener('click', async () => {
+  if (!validTradeSelected()) { setStatus('Pick two teams and add at least one player.'); return; }
+  setStatus('Previewing…');
+  try { await runAnimation(false); setStatus('Preview done.'); }
+  catch (e) { setStatus('Preview error: ' + e.message); animating = false; }
+});
+
+document.getElementById('recordBtn').addEventListener('click', async () => {
+  if (!validTradeSelected()) { setStatus('Pick two teams and add at least one player.'); return; }
+  if (!window.MediaRecorder) { setStatus('MediaRecorder is not supported in this browser.'); return; }
+  setStatus('Recording…');
+  try { await runAnimation(true); }
+  catch (e) { setStatus('Recording error: ' + e.message); animating = false; }
+});
+
+/* -------------------------------- boot -------------------------------- */
+loadData();
+</script>
+</body>
+</html>
