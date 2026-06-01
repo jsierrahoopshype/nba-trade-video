@@ -3,9 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NBA Trade Video Generator — data step</title>
+<title>NBA Trade Video Generator</title>
 <!-- PapaParse is used only to read /api/salaries for the player/team pickers. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<!-- Poppins — same font family as the Bar Chart Race generator (on-brand). -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root{
     --bg:#0b0f17; --panel:#131a26; --panel2:#1b2433; --line:#283449;
@@ -63,6 +67,15 @@
   @media (max-width:680px){.grid2{grid-template-columns:1fr}}
   .hint{font-size:11px;color:var(--muted);margin-top:6px;line-height:1.5}
   iframe#tmFrame{display:none}
+  /* ---- render controls ---- */
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{background:var(--panel2);color:var(--muted);border:none;padding:8px 14px;cursor:pointer;font-size:13px;font-weight:600}
+  .seg button.active{background:var(--accent);color:#fff}
+  .toggle{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px}
+  /* ---- video stage ---- */
+  canvas#stageCanvas{background:#0f0c29;border-radius:14px;border:1px solid var(--line);max-width:100%;max-height:74vh;height:auto;display:block;margin:0 auto}
+  video#out{max-width:100%;max-height:52vh;border-radius:14px;display:none;margin:10px auto 0}
+  #renderStatus{font-size:12px;color:var(--muted);min-height:16px;margin-top:8px}
 </style>
 </head>
 <body>
@@ -108,6 +121,25 @@
       <div id="banner" class="banner"></div>
       <div id="status">Loading live salary data for pickers…</div>
     </div>
+
+    <div class="card" id="renderCard" style="opacity:.5;pointer-events:none">
+      <h2>Render video</h2>
+      <label>Aspect ratio</label>
+      <div class="seg" id="aspectSeg">
+        <button data-aspect="9:16" class="active">Vertical 9:16</button>
+        <button data-aspect="1:1">Square 1:1</button>
+      </div>
+      <div class="toggle">
+        <input type="checkbox" id="quizMode">
+        <label for="quizMode" style="margin:0">Quiz mode — freeze on “what completes this?” before the reveal</label>
+      </div>
+      <div class="actions" style="margin-top:12px">
+        <button class="btn btn-ghost" id="previewBtn">▶ Preview</button>
+        <button class="btn btn-primary" id="recordBtn">⬤ Record &amp; download</button>
+      </div>
+      <div id="renderStatus"></div>
+      <div class="hint">Animated on-brand with the Bar Chart Race generator (Poppins, brand gradient, cubic easing). Output is WebM; convert with <code>ffmpeg -i in.webm out.mp4</code> if needed.</div>
+    </div>
   </div>
 
   <!-- ===================== STAGE ===================== -->
@@ -119,6 +151,11 @@
 
     <div id="resultWrap" style="display:none">
       <div class="card">
+        <h2>Video</h2>
+        <canvas id="stageCanvas" width="1080" height="1920"></canvas>
+        <video id="out" controls></video>
+      </div>
+      <div class="card">
         <h2>Trade Machine verdict</h2>
         <div id="verdict" class="verdict"></div>
         <div id="verdictMsg" style="color:var(--muted)"></div>
@@ -129,7 +166,9 @@
       </div>
       <div class="card">
         <h2>Raw tradeTeams (read from the engine)</h2>
-        <pre id="jsonDump"></pre>
+        <details><summary style="cursor:pointer;color:var(--muted)">Show JSON</summary>
+          <pre id="jsonDump"></pre>
+        </details>
       </div>
     </div>
   </div>
@@ -534,6 +573,14 @@ function renderResult(res){
 
   // raw dump
   $('jsonDump').textContent = JSON.stringify(res.tradeTeams, null, 2);
+
+  // hand the legal package to the video renderer
+  lastResult = res;
+  $('renderCard').style.opacity = '1';
+  $('renderCard').style.pointerEvents = 'auto';
+  prepareRender();
+  // draw a static "final" frame so the canvas isn't blank before preview/record
+  renderStaticPreview().catch(()=>{});
 }
 
 function assetRow(p){
@@ -550,6 +597,526 @@ function pickLabel(pk){
   const parts = [pk.year, pk.round, pk.team || pk.pickTeam].filter(Boolean);
   return parts.join(' ') || JSON.stringify(pk);
 }
+
+/* ============================================================================
+   VIDEO RENDERER
+   Consumes the legal `tradeTeams` captured from the engine. Visual style is
+   matched to the Bar Chart Race generator: Poppins, brand gradient
+   (#0f0c29 -> #302b63) + vignette + film noise, NBA team-color gradient bars
+   with highlight strip + soft shadow, and its easing — ease_out_cubic for
+   entries, ease_in_out_cubic for the meter, LINEAR value count-ups.
+   Output: canvas + MediaRecorder webm. Headshots load via the image proxy with
+   crossOrigin="anonymous" so the canvas is never tainted.
+   ============================================================================ */
+let lastResult = null;
+
+/* ----- NBA team colors (primary), from the Bar Chart Race config ----- */
+const TEAM_COLORS = {
+  ATL:'#E03A3E',BOS:'#007A33',BKN:'#000000',CHA:'#1D1160',CHI:'#CE1141',CLE:'#860038',
+  DAL:'#00538C',DEN:'#0E2240',DET:'#C8102E',GSW:'#1D428A',HOU:'#CE1141',IND:'#002D62',
+  LAC:'#C8102E',LAL:'#FDB927',MEM:'#5D76A9',MIA:'#98002E',MIL:'#00471B',MIN:'#0C2340',
+  NOP:'#0C2340',NYK:'#006BB6',OKC:'#007AC1',ORL:'#0077C0',PHI:'#006BB6',PHX:'#1D1160',
+  POR:'#E03A3E',SAC:'#5A2D81',SAS:'#C4CED4',TOR:'#CE1141',UTA:'#002B5C',WAS:'#002B5C'
+};
+const TEAM_NAME_TO_ABBR = [
+  ['hawks','ATL'],['celtics','BOS'],['nets','BKN'],['hornets','CHA'],['bulls','CHI'],
+  ['cavalier','CLE'],['maverick','DAL'],['nugget','DEN'],['piston','DET'],['warrior','GSW'],
+  ['rocket','HOU'],['pacer','IND'],['clipper','LAC'],['laker','LAL'],['grizzl','MEM'],
+  ['heat','MIA'],['buck','MIL'],['timberwolves','MIN'],['wolves','MIN'],['minnesota','MIN'],
+  ['pelican','NOP'],['knick','NYK'],['thunder','OKC'],['magic','ORL'],['76er','PHI'],['sixers','PHI'],
+  ['phila','PHI'],['suns','PHX'],['phoenix','PHX'],['trail','POR'],['blazer','POR'],['portland','POR'],
+  ['kings','SAC'],['sacramento','SAC'],['spur','SAS'],['raptor','TOR'],['jazz','UTA'],['wizard','WAS']
+];
+const FALLBACK_PALETTE = ['#4E79A7','#F28E2B','#E15759','#76B7B2','#59A14F','#B07AA1','#9C755F','#AF7AA1'];
+
+function teamAbbr(name){
+  const n = (name||'').toLowerCase();
+  for(const [kw,ab] of TEAM_NAME_TO_ABBR){ if(n.includes(kw)) return ab; }
+  return null;
+}
+function teamColor(name){
+  const ab = teamAbbr(name);
+  if(ab && TEAM_COLORS[ab]) {
+    const c = TEAM_COLORS[ab];
+    return (c.toUpperCase()==='#000000') ? '#1f2937' : c; // keep BKN visible on dark bg
+  }
+  let h=0; for(let i=0;i<(name||'').length;i++) h=(h*31+name.charCodeAt(i))>>>0;
+  return FALLBACK_PALETTE[h % FALLBACK_PALETTE.length];
+}
+
+/* ------------------------------ color utils ------------------------------ */
+function hexToRgb(h){ h=h.replace('#',''); if(h.length===3) h=h.split('').map(c=>c+c).join('');
+  return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
+function rgbStr(rgb,a){ return a===undefined?`rgb(${rgb[0]},${rgb[1]},${rgb[2]})`:`rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`; }
+function lighten(rgb,amt){ return rgb.map(v=>Math.round(v+(255-v)*amt)); }
+
+/* -------------------------------- easing -------------------------------- */
+const clamp01 = v => Math.max(0,Math.min(1,v));
+// Bar Chart Race easings (animate.py)
+const easeOutCubic = t => 1 - Math.pow(1-t,3);
+const easeInOutCubic = t => t<0.5 ? 4*t*t*t : 1 - Math.pow(-2*t+2,3)/2;
+const lerp = (a,b,t)=>a+(b-a)*t;
+
+/* --------------------------- image loading (proxy) ----------------------- */
+const imageCache = new Map();
+function loadImage(url){
+  if(!url) return Promise.resolve(null);
+  if(imageCache.has(url)) return Promise.resolve(imageCache.get(url));
+  return new Promise(resolve=>{
+    const img = new Image();
+    img.crossOrigin = 'anonymous';                 // keep the canvas untainted
+    img.onload = ()=>{ imageCache.set(url,img); resolve(img); };
+    img.onerror = ()=>{ imageCache.set(url,null); resolve(null); };
+    img.src = proxied(url);
+  });
+}
+async function preloadRenderImages(){
+  const urls = new Set();
+  buildSides().forEach(side=>{
+    if(side.logo) urls.add(side.logo);
+    side.chips.forEach(c=>{ if(c.headshot) urls.add(c.headshot); });
+  });
+  await Promise.all([...urls].map(loadImage));
+}
+
+/* ---------------- build the two "sides" (what each team sends) ----------- */
+// A chip is one outgoing asset (player or pick). Salary drives the count-up.
+function buildSides(){
+  const teams = (lastResult && lastResult.tradeTeams) ? lastResult.tradeTeams.slice(0,2) : [];
+  return teams.map(t=>{
+    const logo = (t.playersOut.find(p=>p.teamLogo)||{}).teamLogo || '';
+    const chips = [];
+    (t.playersOut||[]).forEach(p=>chips.push({ kind:'player', name:p.player, sub:(p.position||p.team||''),
+      salary:p.salary||0, headshot:p.headshot||'' }));
+    (t.picksOut||[]).forEach(pk=>chips.push({ kind:'pick', name:pickLabel(pk), sub:'Draft pick', salary:0, headshot:'' }));
+    (t.rightsOut||[]).forEach(r=>chips.push({ kind:'rights', name:(r.playerName||pickLabel(r)), sub:'Draft rights', salary:0, headshot:'' }));
+    const total = chips.reduce((s,c)=>s+c.salary,0);
+    return { teamName:t.teamName, color:teamColor(t.teamName), logo, chips, total };
+  });
+}
+
+/* ------------------------------ layout map ------------------------------- */
+function getLayout(aspect){
+  if(aspect==='1:1'){
+    return { aspect, W:1080, H:1080, titleY:58,
+      cols:[ {x:36,y:150,w:492,h:700,from:'left'}, {x:552,y:150,w:492,h:700,from:'right'} ],
+      meter:{x:60,y:892,w:960,h:150}, vertical:false };
+  }
+  return { aspect:'9:16', W:1080, H:1920, titleY:96,
+    cols:[ {x:54,y:236,w:972,h:560,from:'left'}, {x:54,y:1150,w:972,h:560,from:'right'} ],
+    meter:{x:80,y:856,w:920,h:236}, vertical:true };
+}
+
+/* ------------------------------ timeline -------------------------------- */
+const CHIP_DUR = 0.55, CHIP_STAGGER = 0.34;
+function teamPhaseDur(n){ return Math.max(1.3, CHIP_STAGGER*Math.max(0,n-1) + CHIP_DUR + 0.25); }
+function buildTimeline(sides, quizMode){
+  const nA = sides[0]?sides[0].chips.length:0;
+  const nB = sides[1]?sides[1].chips.length:0;
+  const phases = [ {key:'hook',dur:1.25}, {key:'teamA',dur:teamPhaseDur(nA)} ];
+  if(quizMode) phases.push({key:'gate',dur:1.9});
+  phases.push({key:'teamB',dur:teamPhaseDur(nB)});
+  phases.push({key:'meter',dur:1.4});
+  phases.push({key:'verdict',dur:1.6});
+  phases.push({key:'end',dur:1.5});
+  let t=0; const win={}; phases.forEach(p=>{ win[p.key]={s:t,e:t+p.dur}; t+=p.dur; });
+  return { win, total:t, hasGate:!!quizMode, nA, nB };
+}
+
+/* ----------------------- animated running totals ------------------------ */
+// LINEAR count-up: each chip contributes its salary as it flies in.
+function animatedTotal(side, phaseStart, t){
+  let sum=0;
+  side.chips.forEach((c,i)=>{
+    const s = phaseStart + i*CHIP_STAGGER;
+    sum += c.salary * clamp01((t - s)/CHIP_DUR);
+  });
+  return sum;
+}
+
+/* ------------------------------ canvas refs ----------------------------- */
+const canvas = $('stageCanvas');
+const ctx = canvas.getContext('2d');
+let R = { layout:getLayout('9:16'), sides:[], timeline:null };
+let animating = false;
+
+function getAspect(){ const el=document.querySelector('#aspectSeg button.active'); return el?el.dataset.aspect:'9:16'; }
+function prepareRender(){
+  const aspect = getAspect();
+  const quiz = $('quizMode').checked;
+  const layout = getLayout(aspect);
+  canvas.width = layout.W; canvas.height = layout.H;
+  const sides = buildSides();
+  R = { layout, sides, timeline:buildTimeline(sides, quiz) };
+  return R;
+}
+
+/* ------------------------------ draw helpers ---------------------------- */
+function roundRect(c,x,y,w,h,r){ r=Math.min(r,w/2,h/2); c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath(); }
+function fitFont(c,text,maxW,base,weight){ let s=base;
+  do{ c.font=`${weight} ${s}px Poppins, sans-serif`; if(c.measureText(text).width<=maxW||s<=12) break; s-=1; }while(true); return s; }
+function F(c,weight,size){ c.font=`${weight} ${size}px Poppins, sans-serif`; }
+
+function drawBackground(c,layout){
+  const g=c.createLinearGradient(0,0,0,layout.H);   // brand gradient
+  g.addColorStop(0,'#0f0c29'); g.addColorStop(1,'#302b63');
+  c.fillStyle=g; c.fillRect(0,0,layout.W,layout.H);
+  // subtle radial mesh glow
+  const rg=c.createRadialGradient(layout.W/2,layout.H*0.36,80,layout.W/2,layout.H*0.36,layout.H*0.7);
+  rg.addColorStop(0,'rgba(120,90,220,.18)'); rg.addColorStop(1,'rgba(0,0,0,0)');
+  c.fillStyle=rg; c.fillRect(0,0,layout.W,layout.H);
+}
+function drawVignetteNoise(c,layout){
+  // vignette (radial darken outer edge), matches bar race
+  const v=c.createRadialGradient(layout.W/2,layout.H/2,layout.H*0.34,layout.W/2,layout.H/2,layout.H*0.72);
+  v.addColorStop(0,'rgba(0,0,0,0)'); v.addColorStop(1,'rgba(0,0,0,0.42)');
+  c.fillStyle=v; c.fillRect(0,0,layout.W,layout.H);
+  // light film noise
+  c.save(); c.globalAlpha=0.035;
+  for(let i=0;i<noiseDots.length;i++){ const d=noiseDots[i]; c.fillStyle=d.w?'#fff':'#000';
+    c.fillRect(d.x*layout.W, d.y*layout.H, 2, 2); }
+  c.restore();
+}
+const noiseDots = Array.from({length:900},()=>({x:Math.random(),y:Math.random(),w:Math.random()>0.5}));
+
+function drawHeadshotRounded(c,img,x,y,size,fallbackColor,fallbackText){
+  const r=12;
+  c.save(); roundRect(c,x,y,size,size,r); c.clip();
+  c.fillStyle='#0e1420'; c.fillRect(x,y,size,size);
+  if(img){ const ar=img.width/img.height; let dw=size,dh=size;
+    if(ar>1){ dh=size; dw=dh*ar; } else { dw=size; dh=dw/ar; }
+    c.drawImage(img,x+(size-dw)/2,y+(size-dh)/2,dw,dh);
+  } else {
+    c.fillStyle=fallbackColor; c.fillRect(x,y,size,size);
+    c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,700,size*0.42);
+    c.fillText((fallbackText||'?').slice(0,2).toUpperCase(),x+size/2,y+size/2);
+  }
+  c.restore();
+}
+
+// One chip = a Bar-Chart-Race-style rounded bar with team-color gradient.
+function drawChip(c,x,y,w,h,chip,color,alpha){
+  const base=hexToRgb(color), light=lighten(base,0.42);
+  c.save(); c.globalAlpha=alpha;
+  // soft shadow
+  roundRect(c,x,y+5,w,h,h*0.28); c.fillStyle='rgba(0,0,0,0.30)'; c.fill();
+  // gradient body
+  const g=c.createLinearGradient(x,0,x+w,0);
+  g.addColorStop(0,rgbStr(base)); g.addColorStop(1,rgbStr(light));
+  roundRect(c,x,y,w,h,h*0.28); c.fillStyle=g; c.fill();
+  // top highlight strip
+  c.save(); roundRect(c,x,y,w,h,h*0.28); c.clip();
+  c.fillStyle='rgba(255,255,255,0.16)'; c.fillRect(x,y,w,h*0.34); c.restore();
+  // thin border
+  roundRect(c,x,y,w,h,h*0.28); c.lineWidth=1.5; c.strokeStyle='rgba(255,255,255,0.22)'; c.stroke();
+  // headshot at left (in-bar, rounded rectangle — bar race style)
+  const pad=h*0.14, hs=h-pad*2;
+  if(chip.kind==='player'){
+    drawHeadshotRounded(c, imageCache.get(chip.headshot)||null, x+pad, y+pad, hs, rgbStr(lighten(base,0.2)), chip.name);
+  } else {
+    // pick/rights icon tile
+    c.save(); roundRect(c,x+pad,y+pad,hs,hs,12); c.fillStyle='rgba(255,255,255,0.14)'; c.fill();
+    c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,700,hs*0.5);
+    c.fillText(chip.kind==='pick'?'🛡':'🔑',x+pad+hs/2,y+pad+hs/2); c.restore();
+  }
+  const tx=x+pad+hs+16;
+  // name
+  c.fillStyle='#ffffff'; c.textAlign='left'; c.textBaseline='alphabetic';
+  const nameMax = w - (tx-x) - (chip.salary>0?170:24);
+  const fs=fitFont(c,chip.name,nameMax,Math.round(h*0.30),700);
+  F(c,700,fs); c.fillText(chip.name, tx, y+h*0.46);
+  // sub
+  c.fillStyle='rgba(255,255,255,0.78)'; F(c,500,Math.round(h*0.18));
+  c.fillText(chip.sub||'', tx, y+h*0.74);
+  // salary (right, tabular)
+  if(chip.salary>0){
+    c.fillStyle='#ffffff'; c.textAlign='right'; F(c,700,Math.round(h*0.26));
+    c.fillText(formatSalary(chip.salary), x+w-18, y+h*0.6);
+  }
+  c.restore();
+}
+
+function drawTeamHeader(c,col,side,dollars){
+  const y=col.y-66;
+  const logo=side.logo?imageCache.get(side.logo):null;
+  let tx=col.x;
+  if(logo){ c.drawImage(logo,col.x,y,48,48); tx=col.x+60; }
+  else { // color dot
+    c.beginPath(); c.arc(col.x+22,y+24,22,0,Math.PI*2); c.fillStyle=side.color; c.fill(); tx=col.x+58; }
+  c.fillStyle='#ffffff'; c.textAlign='left'; c.textBaseline='alphabetic';
+  const fs=fitFont(c,side.teamName,col.w-220,34,800); F(c,800,fs);
+  c.fillText(side.teamName, tx, y+24);
+  c.fillStyle='rgba(255,255,255,0.6)'; F(c,500,15);
+  c.fillText('SENDS', tx, y+46);
+  // running outgoing dollars
+  c.textAlign='right'; c.fillStyle='#ffffff'; F(c,800,34);
+  c.fillText(formatSalary(Math.round(dollars)), col.x+col.w, y+34);
+}
+
+function drawTeamChips(c,col,side,phaseStart,t,layout){
+  const n=side.chips.length; if(!n) return;
+  const gap=14;
+  const chipH=Math.min(layout.aspect==='1:1'?104:120, (col.h-gap*(n-1))/n);
+  const totalH=chipH*n+gap*(n-1);
+  const startY=col.y + Math.max(0,(col.h-totalH)/2);
+  side.chips.forEach((chip,i)=>{
+    const cs=phaseStart + i*CHIP_STAGGER;
+    const p=clamp01((t-cs)/CHIP_DUR);
+    if(p<=0) return;
+    const e=easeOutCubic(p);
+    const offDir = col.from==='left' ? -1 : 1;
+    const offX = offDir*(1-e)*(col.w+200);
+    const x=col.x+offX, y=startY+i*(chipH+gap);
+    drawChip(c,x,y,col.w,chipH,chip,side.color,e);
+  });
+}
+
+function drawMeter(c,m,sides,t,win,layout){
+  const a=animatedTotal(sides[0],win.teamA.s,t);
+  const b=animatedTotal(sides[1],win.teamB.s,t);
+  const big=Math.max(a,b,1), small=Math.min(a,b);
+  // ease the displayed fill a touch during the meter phase
+  const matchRaw = small/big;
+  const settle = t>=win.meter.s ? easeInOutCubic(clamp01((t-win.meter.s)/(win.meter.e-win.meter.s))) : 0;
+  const match = matchRaw*(0.85+0.15*settle);
+  // label
+  c.fillStyle='rgba(255,255,255,0.85)'; c.textAlign='center'; c.textBaseline='alphabetic';
+  F(c,700,Math.round(m.h*0.16)); c.fillText('SALARY MATCH', m.x+m.w/2, m.y-14);
+  // track
+  const barY=m.y+m.h*0.40, barH=m.h*0.30;
+  roundRect(c,m.x,barY,m.w,barH,barH/2); c.fillStyle='rgba(255,255,255,0.10)'; c.fill();
+  // fill (white -> accent gradient, bar-race feel)
+  const fw=Math.max(barH,m.w*clamp01(match));
+  const g=c.createLinearGradient(m.x,0,m.x+m.w,0);
+  g.addColorStop(0,'#ffffff'); g.addColorStop(1,'#a29bfe');
+  c.save(); roundRect(c,m.x,barY,fw,barH,barH/2); c.fillStyle=g; c.fill();
+  roundRect(c,m.x,barY,fw,barH,barH/2); c.clip();
+  c.fillStyle='rgba(255,255,255,0.18)'; c.fillRect(m.x,barY,fw,barH*0.4); c.restore();
+  // side totals
+  c.fillStyle='#ffffff'; F(c,700,Math.round(m.h*0.18));
+  c.textAlign='left';  c.fillText(formatSalary(Math.round(a)), m.x, barY+barH+m.h*0.22);
+  c.textAlign='right'; c.fillText(formatSalary(Math.round(b)), m.x+m.w, barY+barH+m.h*0.22);
+}
+
+function drawHook(c,layout,alpha,t){
+  c.save(); c.globalAlpha=alpha;
+  c.fillStyle='rgba(15,12,41,0.94)'; c.fillRect(0,0,layout.W,layout.H);
+  c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
+  const big=fitFont(c,'WOULD YOU DO',layout.W-130,layout.aspect==='1:1'?78:104,800);
+  F(c,800,big);
+  c.fillText('WOULD YOU DO', layout.W/2, layout.H*0.30);
+  c.fillText('THIS TRADE?',  layout.W/2, layout.H*0.30+big*1.06);
+  // team marks (logos + VS) animate up
+  const sides=R.sides, cy=layout.H*0.56, rr=layout.aspect==='1:1'?78:96, gap=layout.aspect==='1:1'?110:130;
+  const rise=(1-easeOutCubic(clamp01(t/0.9)))*60;
+  [0,1].forEach(i=>{
+    const s=sides[i]; if(!s) return;
+    const cx = i===0 ? layout.W/2-gap-rr : layout.W/2+gap+rr;
+    const logo=s.logo?imageCache.get(s.logo):null;
+    c.save(); c.translate(0,rise*(i===0?-1:-1));
+    c.beginPath(); c.arc(cx,cy,rr,0,Math.PI*2); c.fillStyle=s.color; c.fill();
+    c.lineWidth=4; c.strokeStyle='rgba(255,255,255,0.6)'; c.stroke();
+    if(logo){ c.save(); c.beginPath(); c.arc(cx,cy,rr-6,0,Math.PI*2); c.clip();
+      const sz=rr*1.7; c.drawImage(logo,cx-sz/2,cy-sz/2,sz,sz); c.restore(); }
+    c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='alphabetic'; F(c,700,24);
+    c.fillText(s.teamName, cx, cy+rr+38);
+    c.restore();
+  });
+  c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?60:72);
+  c.fillText('VS', layout.W/2, cy);
+  c.restore();
+}
+
+function drawGate(c,layout,t,dur){
+  const a=t<0.3?t/0.3:t>dur-0.3?clamp01((dur-t)/0.3):1;
+  c.save(); c.globalAlpha=a; c.fillStyle='rgba(15,12,41,0.9)'; c.fillRect(0,0,layout.W,layout.H);
+  const pulse=1+Math.sin(t*4)*0.03;
+  c.translate(layout.W/2,layout.H*0.46); c.scale(pulse,pulse);
+  c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
+  F(c,800,52); c.fillText('What completes', 0,-70);
+  F(c,800,52); c.fillText('this trade?', 0,-6);
+  const teamB=R.sides[1]?R.sides[1].teamName:'';
+  c.fillStyle='#a29bfe'; const fs=fitFont(c,teamB,layout.W-160,46,700); F(c,700,fs);
+  c.fillText(teamB, 0, 70);
+  c.fillStyle='rgba(255,255,255,0.6)'; F(c,500,30); c.fillText('🤔', 0, 150);
+  c.restore();
+}
+
+function drawVerdict(c,layout,t){
+  const v = lastResult ? lastResult.verdict : null;
+  const works = v ? !!v.valid : false;
+  const e=easeOutCubic(clamp01(t/0.6));
+  const cx=layout.W/2, cy=layout.aspect==='1:1'?layout.H*0.44:layout.H*0.46;
+  const text = v ? (works ? (v.type==='valid'?'LEGAL':'LEGAL*') : 'NOT LEGAL') : 'NO VERDICT';
+  const col = works ? '#22c55e' : (v?'#ef4444':'#888');
+  c.save(); c.translate(cx,cy); c.rotate(-0.08); c.scale(0.6+0.4*e, 0.6+0.4*e); c.globalAlpha=clamp01(t*1.6);
+  F(c,800,layout.aspect==='1:1'?86:104); c.textAlign='center'; c.textBaseline='middle';
+  const w=c.measureText(text).width+72, h=(layout.aspect==='1:1'?86:104)+46;
+  c.fillStyle='rgba(15,12,41,0.66)'; roundRect(c,-w/2,-h/2,w,h,16); c.fill();
+  c.lineWidth=8; c.strokeStyle=col; roundRect(c,-w/2,-h/2,w,h,16); c.stroke();
+  c.fillStyle=col; c.fillText(text,0,4);
+  c.restore();
+  // reason line = the Trade Machine's own message (never recomputed here)
+  const msg = v && v.message ? v.message : '';
+  if(msg){
+    const a2=clamp01((t-0.3)*2);
+    const fs=fitFont(c,msg,layout.W-160,28,500); F(c,500,fs);
+    const ry=cy+h/2+58, lh=fs*1.32;
+    // translucent backing so the reason stays legible over chips/meter
+    c.globalAlpha=a2*0.85; c.fillStyle='rgba(15,12,41,0.82)';
+    roundRect(c, 50, ry-lh, layout.W-100, lh*2+18, 14); c.fill();
+    c.globalAlpha=a2; c.fillStyle='#e8e8f5'; c.textAlign='center'; c.textBaseline='middle';
+    wrapText(c, msg, layout.W/2, ry, layout.W-160, lh, 2);
+    c.globalAlpha=1;
+  }
+}
+function wrapText(c,text,cx,y,maxW,lh,maxLines){
+  const words=text.split(/\s+/); let line='',lines=[];
+  for(const w of words){ const test=line?line+' '+w:w;
+    if(c.measureText(test).width>maxW && line){ lines.push(line); line=w; } else line=test; }
+  if(line) lines.push(line);
+  lines=lines.slice(0,maxLines);
+  lines.forEach((ln,i)=>c.fillText(ln,cx,y+i*lh));
+}
+
+function drawEndCard(c,layout,alpha){
+  c.save(); c.globalAlpha=alpha; c.fillStyle='rgba(15,12,41,0.93)'; c.fillRect(0,0,layout.W,layout.H);
+  c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
+  F(c,800,layout.aspect==='1:1'?70:84); c.fillText('YOUR CALL', layout.W/2, layout.H*0.32);
+  const by=layout.H*0.46, bw=layout.W*0.6, bh=104, gap=34;
+  c.fillStyle='#22c55e'; roundRect(c,layout.W/2-bw/2,by,bw,bh,16); c.fill();
+  c.fillStyle='#ef4444'; roundRect(c,layout.W/2-bw/2,by+bh+gap,bw,bh,16); c.fill();
+  c.fillStyle='#fff'; F(c,700,42);
+  c.fillText('👍  DO IT', layout.W/2, by+bh/2);
+  c.fillText('👎  PASS', layout.W/2, by+bh+gap+bh/2);
+  c.fillStyle='rgba(255,255,255,0.7)'; F(c,500,30);
+  c.fillText('Vote in the comments 👇', layout.W/2, by+2*bh+2*gap+28);
+  c.restore();
+}
+
+/* ------------------------------ master frame ---------------------------- */
+function drawFrame(elapsed){
+  const c=ctx, layout=R.layout, tl=R.timeline, win=tl.win, sides=R.sides;
+  drawBackground(c,layout);
+
+  const afterHook = elapsed >= win.hook.e-0.3;
+  const layoutA = clamp01((elapsed-(win.hook.e-0.3))/0.4);
+  if(afterHook){
+    c.globalAlpha=layoutA;
+    // title
+    c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?34:42);
+    c.fillText('WOULD YOU DO THIS TRADE?', layout.W/2, layout.titleY);
+    // team A
+    if(sides[0]){
+      drawTeamHeader(c,layout.cols[0],sides[0],animatedTotal(sides[0],win.teamA.s,elapsed));
+      drawTeamChips(c,layout.cols[0],sides[0],win.teamA.s,elapsed,layout);
+    }
+    // team B (hidden until its phase / after gate)
+    if(sides[1]){
+      const bShown = elapsed>=win.teamB.s;
+      drawTeamHeader(c,layout.cols[1],sides[1], bShown?animatedTotal(sides[1],win.teamB.s,elapsed):0);
+      if(bShown) drawTeamChips(c,layout.cols[1],sides[1],win.teamB.s,elapsed,layout);
+    }
+    // meter — reflects running totals continuously
+    drawMeter(c,layout.meter,sides,elapsed,win,layout);
+    c.globalAlpha=1;
+  }
+
+  if(elapsed<win.hook.e){
+    const a = elapsed<0.3?elapsed/0.3 : elapsed>win.hook.e-0.3?clamp01((win.hook.e-elapsed)/0.3):1;
+    drawHook(c,layout,a,elapsed);
+  }
+  if(tl.hasGate && elapsed>=win.gate.s && elapsed<win.gate.e){
+    drawGate(c,layout,elapsed-win.gate.s,win.gate.e-win.gate.s);
+  }
+  if(elapsed>=win.verdict.s){ drawVerdict(c,layout,elapsed-win.verdict.s); }
+  if(elapsed>=win.end.s){ drawEndCard(c,layout,clamp01((elapsed-win.end.s)/0.4)); }
+
+  // brand finish on top
+  drawVignetteNoise(c,layout);
+}
+
+/* ------------------------------ run / record ---------------------------- */
+async function ensureFonts(){
+  try{
+    if(document.fonts && document.fonts.load){
+      await Promise.all(['300','500','600','700','800'].map(w=>document.fonts.load(`${w} 40px Poppins`)));
+      await document.fonts.ready;
+    }
+  }catch(e){/* fall back to sans-serif */}
+}
+
+function runAnimation(record){
+  return new Promise(async (resolve,reject)=>{
+    if(animating) return resolve();
+    if(!lastResult){ return reject(new Error('No trade to render')); }
+    animating=true;
+    await ensureFonts();
+    await preloadRenderImages();
+    prepareRender();
+    const total=R.timeline.total;
+
+    let recorder=null, chunks=[];
+    if(record){
+      const stream=canvas.captureStream(60);
+      let mime=''; for(const m of ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']){
+        if(window.MediaRecorder && MediaRecorder.isTypeSupported(m)){ mime=m; break; } }
+      try{ recorder=new MediaRecorder(stream, mime?{mimeType:mime,videoBitsPerSecond:12000000}:undefined); }
+      catch(e){ animating=false; return reject(e); }
+      recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+      recorder.onstop=()=>{
+        const blob=new Blob(chunks,{type:'video/webm'});
+        const url=URL.createObjectURL(blob);
+        const v=$('out'); v.src=url; v.style.display='block';
+        const a=document.createElement('a'); a.href=url;
+        a.download=`trade-${getAspect().replace(':','x')}.webm`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setRenderStatus('Saved '+a.download+' — check it plays above.');
+        animating=false; resolve();
+      };
+      recorder.start();
+    }
+    const start=performance.now();
+    function frame(now){
+      let el=(now-start)/1000; if(el>=total) el=total;
+      drawFrame(el);
+      if(el<total) requestAnimationFrame(frame);
+      else setTimeout(()=>{ if(recorder) recorder.stop(); else { animating=false; resolve(); } }, 220);
+    }
+    requestAnimationFrame(frame);
+  });
+}
+
+function setRenderStatus(t){ $('renderStatus').textContent=t||''; }
+
+async function renderStaticPreview(){
+  await ensureFonts();
+  await preloadRenderImages();
+  prepareRender();
+  drawFrame(R.timeline.win.verdict.e - 0.01); // full reveal + verdict, before end card
+}
+
+/* ------------------------------ render wiring --------------------------- */
+document.querySelectorAll('#aspectSeg button').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('#aspectSeg button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); if(lastResult) renderStaticPreview().catch(()=>{});
+}));
+$('quizMode').addEventListener('change',()=>{ if(lastResult) renderStaticPreview().catch(()=>{}); });
+$('previewBtn').addEventListener('click', async ()=>{
+  if(!lastResult){ setRenderStatus('Generate a trade first.'); return; }
+  setRenderStatus('Previewing…');
+  try{ await runAnimation(false); setRenderStatus('Preview done.'); }
+  catch(e){ setRenderStatus('Preview error: '+e.message); animating=false; }
+});
+$('recordBtn').addEventListener('click', async ()=>{
+  if(!lastResult){ setRenderStatus('Generate a trade first.'); return; }
+  if(!window.MediaRecorder){ setRenderStatus('MediaRecorder not supported in this browser.'); return; }
+  setRenderStatus('Recording…');
+  try{ await runAnimation(true); }
+  catch(e){ setRenderStatus('Recording error: '+e.message); animating=false; }
+});
 
 /* ------------------------------- wiring ------------------------------- */
 wirePlayerSearch('playerSearch', 'playerResults', selectedPlayers, 'playerChips');

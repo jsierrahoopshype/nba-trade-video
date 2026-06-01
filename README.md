@@ -1,10 +1,10 @@
 # NBA Trade Video Generator
 
-A tool for turning an NBA trade into a short social video.
+Turns an NBA trade into a short, animated social video (9:16 or 1:1).
 
-**This repo is at the DATA step.** Right now it proves one thing: it can drive
-the real NBA Trade Machine in loop/generation mode and read back the resulting
-legal `tradeTeams` object. No animation yet.
+The trade and its verdict come **only** from the real NBA Trade Machine (loaded
+and run in a same-origin iframe). This tool never builds or validates a trade —
+it consumes the engine's `tradeTeams` and animates it.
 
 ## Design rule: no legality logic here
 
@@ -54,15 +54,50 @@ The live `/api/salaries` feed is still used for the **player/team pickers only**
 (names, salaries, headshots) — never for legality. Headshots load through the
 image proxy with `crossOrigin="anonymous"`.
 
+## The animated renderer
+
+Once a legal `tradeTeams` is captured, the **Render video** card animates it on a
+canvas and records a downloadable WebM via `MediaRecorder`. The look is matched
+to the [Bar Chart Race generator](https://github.com/jsierrahoopshype/bar-chart-race):
+
+- **Poppins** font, brand gradient `#0f0c29 → #302b63`, vignette + film noise.
+- NBA **team-color gradient bars** (chips) with a top highlight strip and soft
+  shadow — the same bar treatment as the race.
+- The race's easing: `ease_out_cubic` for chips flying in, `ease_in_out_cubic`
+  for the meter, and **linear** value interpolation for the salary count-ups
+  (constant growth, no micro-pauses).
+
+Sequence (~9.5s, +~2s in quiz mode):
+
+1. **Hook** — team marks/headshots animate on over "WOULD YOU DO THIS TRADE?".
+2. **Team A chips** fly in one at a time (staggered); the team's outgoing-salary
+   counter ticks up linearly as each lands.
+3. *(quiz mode)* **freeze gate** — holds on "What completes this trade? <Team B>".
+4. **Team B chips** fly in the same way.
+5. **Salary-match meter** fills continuously in response to the running totals.
+6. **Verdict stamp** lands (`LEGAL` / `NOT LEGAL`) with the Trade Machine's own
+   message as the reason line — the verdict is never recomputed here.
+7. **End card / CTA** poll prompt.
+
+Two aspect ratios behind the `aspect` flag:
+- **9:16** (1080×1920) — Team A block on top, Team B on the bottom, meter centered.
+- **1:1** (1080×1080) — Team A left, Team B right, meter across the bottom.
+
+Headshots load through the image proxy with `crossOrigin="anonymous"`, so the
+canvas is never tainted (`toDataURL`/`MediaRecorder` keep working — verified).
+
 ## Use it
 
 1. Describe a scenario the way the loop expects — pick player(s) to move, a
-   **to** team, and/or a **from** team, plus optional excludes. (E.g. *packages
-   for Star Wing to the Bolts* = player `Star Wing` + to `Bolts`.)
-2. Click **Generate via Trade Machine**.
-3. You'll see the loop params being driven, the engine's verdict, a structured
-   per-team summary (out / in / picks), and the **raw `tradeTeams` JSON** dumped
-   from the engine.
+   **to** team, and/or a **from** team, plus optional excludes.
+2. Click **Generate via Trade Machine** — you get the engine's verdict, a
+   per-team summary, and the raw `tradeTeams` JSON (collapsible).
+3. In **Render video**, choose the aspect ratio and (optionally) quiz mode, then
+   **Preview** to watch it on the canvas or **Record & download** to save the
+   WebM.
+
+> Output is WebM (what `MediaRecorder` produces in-browser). Convert if a
+> platform needs MP4: `ffmpeg -i trade-9x16.webm trade-9x16.mp4`.
 
 ## Run locally
 
@@ -88,8 +123,11 @@ Chrome/Edge/Firefox.
   trade. Ask for an impossible package (e.g. exclude every realistic return
   piece) → the engine returns an error and the tool surfaces it without
   inventing anything.
-
-This step is data-only; the JSON dump is the deliverable. Animation comes next.
+- **Render both ratios:** after a trade, switch the aspect to **9:16** and to
+  **1:1** and click **Record & download** for each → a `.webm` downloads and
+  plays back in the preview, with chips flying in, counters ticking, the meter
+  filling, and the verdict stamp landing. Toggle **Quiz mode** to see the freeze
+  gate before Team B's reveal.
 
 ## Deploy to GitHub Pages
 
