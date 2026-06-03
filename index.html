@@ -76,6 +76,11 @@
   canvas#stageCanvas{background:#0f0c29;border-radius:14px;border:1px solid var(--line);max-width:100%;max-height:74vh;height:auto;display:block;margin:0 auto}
   video#out{max-width:100%;max-height:52vh;border-radius:14px;display:none;margin:10px auto 0}
   #renderStatus{font-size:12px;color:var(--muted);min-height:16px;margin-top:8px}
+.tries{display:inline-block;margin-top:6px;font:600 12px/1 ui-monospace,monospace;color:#8aa0c8}
+#attempts{margin-top:8px}
+.att{font:500 11px/1.6 ui-monospace,monospace;padding:1px 0}
+.att.rej{color:#e07a7a}
+.att.ok{color:#6fd08c}
 </style>
 </head>
 <body>
@@ -113,13 +118,15 @@
       <div class="actions">
         <button class="btn btn-primary" id="genBtn" disabled>⚙ Generate via Trade Machine</button>
       </div>
-      <div class="hint">Loads the real Trade Machine in a hidden same-origin iframe (live CSV injected), runs its <code>generateUnifiedTrade()</code>, and reads the resulting <code>tradeTeams</code>. If anything fails, it stops — no fabricated trade.</div>
+      <div class="hint">Loads the real Trade Machine in a hidden same-origin iframe (live CSV injected), runs its <code>generateUnifiedTrade()</code>, and reads the resulting <code>tradeTeams</code>. If anything fails, it stops — no fabricated trade. <b>Auto quality filter:</b> only trades within <b>15%</b> trade-value balance are shown; lopsided ones are auto-rejected and re-rolled.</div>
       <div id="loopUrlWrap" style="display:none">
         <label>Loop params being driven</label>
         <div class="loopurl" id="loopUrl"></div>
       </div>
       <div id="banner" class="banner"></div>
       <div id="status">Loading live salary data for pickers…</div>
+      <span id="tries" class="tries"></span>
+      <div id="attempts" style="display:none"></div>
     </div>
 
     <div class="card" id="renderCard" style="opacity:.5;pointer-events:none">
@@ -192,6 +199,15 @@
 /* ----------------------------- live sources ------------------------------ */
 const SALARIES_URL = 'https://nba-trade-calculator.thejorgesierra.workers.dev/api/salaries';
 const TM_SOURCE_URL = 'https://raw.githubusercontent.com/jsierrahoopshype/TransactionMaster/main/index.html';
+
+/* ---- Auto quality filter ----------------------------------------------
+   Only surface realistic, balanced trades. Balance is scored with the
+   ENGINE'S OWN trade-value data (getTradeValue / getPickTradeValue, with
+   per-player salary fallback) — never reinvented here. A trade is shown
+   only if balance >= 1 - TRADE_QUALITY_TOLERANCE; lopsided ones are
+   auto-rejected and the loop re-rolls. Tune the single number below. */
+const TRADE_QUALITY_TOLERANCE = 0.15;   // 15% — stricter than the engine on purpose
+const MAX_QUALITY_ATTEMPTS    = 12;     // re-rolls before failing closed
 const IMAGE_PROXY   = 'https://hoopshype-rumors-api.thejorgesierra.workers.dev/api/image-proxy?url=';
 const TM_LIVE_ORIGIN = 'https://nba-trade-calculator.thejorgesierra.workers.dev'; // same-origin fast path
 
@@ -333,6 +349,7 @@ window.__TVG_BRIDGE__ = (function(){
     status: function(){
       try{ return { dataReady: (typeof players!=='undefined' && players && players.length>0),
                     count: (typeof players!=='undefined' && players ? players.length : 0),
+                    tvCount: (typeof tradeValueMapLower!=='undefined' && tradeValueMapLower ? tradeValueMapLower.size : 0),
                     hasGenerate: (typeof generateUnifiedTrade==='function') }; }
       catch(e){ return { dataReady:false, count:0, hasGenerate:false, error:String(e) }; }
     },
@@ -406,8 +423,22 @@ window.__TVG_BRIDGE__ = (function(){
           };
         });
 
+        // Per-team trade value via the ENGINE'S OWN functions (salary fallback per player)
+        var tvFn   = (typeof getTradeValue==='function')     ? getTradeValue     : null;
+        var pickFn = (typeof getPickTradeValue==='function') ? getPickTradeValue : null;
+        var tv = tradeTeams.map(function(t){
+          var outP = (t.playersOut||[]).reduce(function(s,p){
+            var v = tvFn ? tvFn(p.player) : 0; return s + (v || p.salary || 0); }, 0);
+          var outK = (t.picksOut||[]).reduce(function(s,pk){
+            var v = pickFn ? pickFn(pk) : 0; return s + (v || 0); }, 0);
+          var inP = (t.playersIn||[]).reduce(function(s,p){
+            var v = tvFn ? tvFn(p.player) : 0; return s + (v || p.salary || 0); }, 0);
+          return { teamName: t.teamName, outTV: outP + outK, inTV: inP };
+        });
+
         return {
           ok:true,
+          tradeValue: tv,
           resolved:{
             players: unifiedSelectedPlayers.map(function(p){return p.player;}),
             from: unifiedOriginTeam, to: unifiedDestTeam,
@@ -492,6 +523,8 @@ function loadTradeMachine(){
    ===================================================================== */
 async function generate(){
   clearBanner();
+  $('tries').textContent = '';
+  $('attempts').style.display = 'none';
   const scn = buildScenario();
   if(!scn.players.length && !scn.to && !scn.from){
     showBanner('err', 'Specify a scenario first — at least a player, a “to” team, or a “from” team.');
@@ -512,28 +545,96 @@ async function generate(){
     return;
   }
 
-  setStatus('Running generateUnifiedTrade() in the engine…');
-  let res;
-  try{
-    res = frame.contentWindow.__TVG_BRIDGE__.run(scn);
-  }catch(e){
+  // Wait for the engine's trade-value data (loaded async from the TV sheet).
+  // Without it the filter can't score — fail closed rather than show unfiltered trades.
+  setStatus('Waiting for trade-value data…');
+  let tvReady = false;
+  const tvDeadline = Date.now() + 12000;
+  while(Date.now() < tvDeadline){
+    let st = null;
+    try{ st = frame.contentWindow.__TVG_BRIDGE__.status(); }catch(e){ st = null; }
+    if(st && st.tvCount > 0){ tvReady = true; break; }
+    await new Promise(r => setTimeout(r, 250));
+  }
+  if(!tvReady){
     setStatus('');
-    showBanner('err', 'FAILED to read the Trade Machine result: ' + e.message + ' — refusing to fabricate a trade.');
+    showBanner('err', 'Trade-value data did not load — the quality filter cannot run. Refusing to show unfiltered trades.');
     $('genBtn').disabled = false;
     return;
   }
 
-  if(!res || !res.ok){
+  // Quality-filter loop: generate, score balance, auto-reject lopsided, re-roll.
+  const attEl = $('attempts');
+  attEl.innerHTML = ''; attEl.style.display = 'block';
+  const minRatio = 1 - TRADE_QUALITY_TOLERANCE;
+  let accepted = null, acceptedBalance = 0;
+
+  for(let attempt = 1; attempt <= MAX_QUALITY_ATTEMPTS; attempt++){
+    $('tries').textContent = 'tries: ' + attempt;
+    setStatus('Attempt ' + attempt + '/' + MAX_QUALITY_ATTEMPTS + ' — running generateUnifiedTrade()…');
+    await new Promise(r => setTimeout(r, 30)); // let the UI paint
+
+    let res;
+    try{
+      res = frame.contentWindow.__TVG_BRIDGE__.run(scn);
+    }catch(e){
+      setStatus('');
+      showBanner('err', 'FAILED to read the Trade Machine result: ' + e.message + ' — refusing to fabricate a trade.');
+      $('genBtn').disabled = false;
+      return;
+    }
+
+    if(!res || !res.ok){
+      setStatus('');
+      showBanner('err', 'The Trade Machine could not produce a legal trade: ' + (res && res.error ? res.error : 'unknown error') + ' — nothing fabricated.');
+      $('genBtn').disabled = false;
+      return;
+    }
+
+    const balance = computeBalance(res.tradeValue);
+    const pct = Math.round(balance * 100);
+    const summary = (res.tradeValue || []).map(t =>
+      t.teamName + ' $' + (t.outTV/1e6).toFixed(1) + 'M').join(' / ');
+
+    if(balance >= minRatio){
+      attEl.insertAdjacentHTML('beforeend',
+        '<div class="att ok">#' + attempt + ' ACCEPT · balance ' + pct + '% · ' + summary + '</div>');
+      accepted = res; acceptedBalance = pct;
+      break;
+    }
+    attEl.insertAdjacentHTML('beforeend',
+      '<div class="att rej">#' + attempt + ' reject · balance ' + pct + '% (&lt; ' + Math.round(minRatio*100) + '%) · ' + summary + '</div>');
+  }
+
+  if(!accepted){
     setStatus('');
-    showBanner('err', 'The Trade Machine could not produce a legal trade: ' + (res && res.error ? res.error : 'unknown error') + ' — nothing fabricated.');
+    showBanner('err', 'No balanced trade found for this scenario within ' + Math.round(TRADE_QUALITY_TOLERANCE*100) + '% value — try a different scenario or loosen the tolerance. No lopsided trade will be shown.');
     $('genBtn').disabled = false;
     return;
   }
 
-  setStatus('Read a legal tradeTeams object from the engine.');
-  showBanner('ok', 'Generated by the real Trade Machine. Data only — not recomputed here.');
-  renderResult(res);
+  setStatus('Read a legal, balanced tradeTeams object from the engine.');
+  showBanner('ok', 'Generated by the real Trade Machine · ⚖ balance ' + acceptedBalance + '% (filter needs ≥ ' + Math.round((1 - TRADE_QUALITY_TOLERANCE)*100) + '%). Data only — not recomputed here.');
+  renderResult(accepted);
   $('genBtn').disabled = false;
+}
+
+/* Balance = worst per-team ratio of value-out vs value-in.
+   For 2-team trades this is min(outA,outB)/max(outA,outB). */
+function computeBalance(tv){
+  if(!tv || tv.length < 2) return 0;
+  if(tv.length === 2){
+    const a = tv[0].outTV, b = tv[1].outTV;
+    if(!a || !b) return 0;
+    return Math.min(a, b) / Math.max(a, b);
+  }
+  let worst = 1;
+  for(const t of tv){
+    const hi = Math.max(t.outTV, t.inTV), lo = Math.min(t.outTV, t.inTV);
+    if(!hi) return 0;
+    worst = Math.min(worst, lo / hi);
+  }
+  return worst;
 }
 
 function renderResult(res){
