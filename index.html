@@ -72,6 +72,25 @@
   .badge{font-weight:800;font-variant-numeric:tabular-nums;border-radius:6px;padding:2px 8px;font-size:13px}
   .badge.good{background:rgba(34,197,94,.16);color:#7ee2a1;border:1px solid rgba(34,197,94,.5)}
   .badge.low{background:rgba(245,158,11,.14);color:#f6c970;border:1px solid rgba(245,158,11,.45)}
+  .badge.approx{outline:2px solid var(--amber);outline-offset:1px}
+  .approxnote{font-size:11px;color:var(--amber);margin-top:4px}
+  .prov{margin-top:6px}
+  .prov summary{cursor:pointer;color:var(--muted);font-size:11.5px;list-style:none}
+  .prov summary::-webkit-details-marker{display:none}
+  .prov summary::before{content:'▸ ';color:var(--muted)}
+  .prov[open] summary::before{content:'▾ '}
+  .provrow{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:2px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+  .provrow .src{font-size:10.5px;padding:1px 6px;border-radius:4px}
+  .provrow .src.sheet{background:rgba(34,197,94,.14);color:#9be7b6}
+  .provrow .src.fallback{background:rgba(245,158,11,.16);color:#f6c970}
+  .provrow .val{font-variant-numeric:tabular-nums;color:#cfe0ff;margin-left:auto;padding-right:8px}
+  .batchprov{font-size:12px;color:var(--amber);margin:2px 0 12px;line-height:1.5}
+  .batchprov.ok{color:var(--muted)}
+  .timing{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:6px 0 10px;background:var(--panel2)}
+  .timing-title{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+  .timing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px 14px}
+  .timing-grid label{margin:0;display:flex;flex-direction:column;gap:4px;font-size:11px}
+  .timing-grid input{padding:6px 8px;font-size:13px}
   .tag{font-size:10.5px;font-weight:700;letter-spacing:.04em;border-radius:5px;padding:2px 7px;text-transform:uppercase}
   .tag.picks{background:rgba(79,140,255,.16);color:#bcd4ff;border:1px solid rgba(79,140,255,.5)}
   .tag.note{background:rgba(245,158,11,.12);color:#f6c970;border:1px solid rgba(245,158,11,.4)}
@@ -117,6 +136,11 @@
       <input type="text" id="excludeSearch" placeholder="Search players to exclude…" autocomplete="off">
       <div class="results" id="excludeResults" style="display:none"></div>
       <div class="chips" id="excludeChips"></div>
+
+      <div class="toggle" style="margin-top:12px">
+        <input type="checkbox" id="tryPicks">
+        <label for="tryPicks" style="margin:0">Try to include draft picks (calls the engine’s <code>addPicksToTrade()</code> after generation; if the package is no longer legal, the picks are dropped)</label>
+      </div>
     </div>
 
     <div class="card">
@@ -155,7 +179,23 @@
           <input type="checkbox" id="quizMode">
           <label for="quizMode" style="margin:0">Quiz mode — freeze on “what completes this?” before the reveal (single package only)</label>
         </div>
+        <div class="timing" id="timingPanel">
+          <div class="timing-title">Timing <span style="color:#5d6b82;font-weight:400">(read at render time)</span></div>
+          <div class="timing-grid">
+            <label>Sec / package segment <span id="segOnly" style="color:#5d6b82">(multi)</span>
+              <input type="text" id="tSeg" value="6.5" inputmode="decimal"></label>
+            <label>Single overall sec <span style="color:#5d6b82">(single)</span>
+              <input type="text" id="tSingle" value="" placeholder="auto" inputmode="decimal"></label>
+            <label>Intro sec
+              <input type="text" id="tIntro" value="2.2" inputmode="decimal"></label>
+            <label>Final card sec
+              <input type="text" id="tFinal" value="2.8" inputmode="decimal"></label>
+            <label>Speed × (chips/counters) <span style="color:#5d6b82">0.5–2</span>
+              <input type="text" id="tSpeed" value="1.0" inputmode="decimal"></label>
+          </div>
+        </div>
         <div class="filterline" id="filterLine"></div>
+        <div class="batchprov" id="batchProv"></div>
         <div id="renderStatus"></div>
         <div id="reviewList"></div>
         <div class="hint" id="picksHint" style="margin-top:10px"></div>
@@ -386,14 +426,30 @@ window.__TVG_BRIDGE__ = (function(){
     var mn=Math.min.apply(null,tvs), mx=Math.max.apply(null,tvs);
     return mx>0 ? Math.round(100*mn/mx) : null;
   }
+  // PROVENANCE: where each player's value came from (sheet vs salary fallback).
+  function provenanceOf(teams){
+    var rows=[];
+    teams.forEach(function(t){
+      (t.playersOut||[]).forEach(function(p){
+        var v = (typeof getTradeValue==='function') ? getTradeValue(p.player) : null;
+        rows.push({ player:p.player, team:t.teamName,
+                    value:(v || p.salary || 0),
+                    source: v ? 'sheet' : 'salary' });
+      });
+    });
+    return rows;
+  }
   return {
     status: function(){
       try{ return { dataReady: (typeof players!=='undefined' && players && players.length>0),
                     count: (typeof players!=='undefined' && players ? players.length : 0),
-                    hasGenerate: (typeof generateUnifiedTrade==='function') }; }
+                    hasGenerate: (typeof generateUnifiedTrade==='function'),
+                    hasAddPicks: (typeof addPicksToTrade==='function'),
+                    tvCount: (typeof tradeValueMapLower!=='undefined' && tradeValueMapLower ? tradeValueMapLower.size : 0) }; }
       catch(e){ return { dataReady:false, count:0, hasGenerate:false, error:String(e) }; }
     },
-    run: function(scn){
+    run: function(scn, opts){
+      opts = opts || {};
       try{
         if(typeof players==='undefined' || !players || !players.length)
           return { ok:false, error:'Trade Machine data not loaded' };
@@ -455,6 +511,35 @@ window.__TVG_BRIDGE__ = (function(){
         if(!validation || !validation.valid)
           return { ok:false, error:'illegal', verdict: validation ? { valid:validation.valid, type:validation.type, message:validation.message } : null };
 
+        // === OPTIONAL: try to sweeten with draft picks via the engine's own
+        // addPicksToTrade(). The acquiring team (destination of the targeted
+        // players) sends picks back to the source team. If the package is no
+        // longer legal after that, we revert to the legal no-pick version. ===
+        if(opts.tryPicks && typeof addPicksToTrade==='function' && unifiedSelectedPlayers.length){
+          var targetNames = unifiedSelectedPlayers.map(function(p){return p.player;});
+          var srcIdx=-1, destIdx=-1;
+          tradeTeams.forEach(function(t,i){
+            (t.playersOut||[]).forEach(function(p){
+              if(targetNames.indexOf(p.player)>=0){ srcIdx=i; if(p.destination!==undefined) destIdx=p.destination; }
+            });
+          });
+          if(srcIdx>=0 && destIdx>=0 && destIdx!==srcIdx){
+            var snapshot = JSON.stringify(tradeTeams);
+            var isSuper=false; try{ var sv=getTradeValue(targetNames[0]); isSuper=(sv||0)>25000000; }catch(e){}
+            var added=false;
+            for(var attempt=0; attempt<10 && !added; attempt++){
+              tradeTeams = JSON.parse(snapshot);
+              var nAdded = addPicksToTrade(tradeTeams, destIdx, srcIdx, isSuper);
+              if(nAdded>0){
+                redistributePlayers(true);
+                var v2 = validateTrade();
+                if(v2 && v2.valid){ validation = v2; added=true; }
+              }
+            }
+            if(!added){ tradeTeams = JSON.parse(snapshot); redistributePlayers(true); } // keep legal no-pick
+          }
+        }
+
         var clean = tradeTeams.map(function(t){
           return {
             teamName: t.teamName,
@@ -471,12 +556,16 @@ window.__TVG_BRIDGE__ = (function(){
         clean.forEach(function(t){ (t.playersOut||[]).forEach(function(p){ allOut.push(p.player); }); });
         var key = allOut.slice().sort().join(' + ');
         var hasPicks = clean.some(function(t){ return (t.picksOut||[]).length>0; });
+        var prov = provenanceOf(clean);
+        var anyFallback = prov.some(function(r){ return r.source==='salary'; });
 
         return {
           ok:true,
           key: key,
           hasPicks: hasPicks,
           balancePct: balancePct(clean),
+          provenance: prov,
+          anyFallback: anyFallback,
           tradeTeams: clean,
           verdict: { valid:validation.valid, type:validation.type, message:validation.message }
         };
@@ -543,7 +632,18 @@ function loadTradeMachine(){
       try{ st = frame.contentWindow && frame.contentWindow.__TVG_BRIDGE__
                  ? frame.contentWindow.__TVG_BRIDGE__.status() : null; }
       catch(e){ throw new Error('Cannot read the Trade Machine (cross-origin). Serve this tool from the same origin as the engine.'); }
-      if(st && st.dataReady && st.hasGenerate) return frame;
+      if(st && st.dataReady && st.hasGenerate){
+        // Best-effort: also wait briefly for the (async) trade-value sheet so balance
+        // provenance reflects real sheet values instead of premature salary fallbacks.
+        // The TV sheet is optional, so never fail if it doesn't arrive.
+        const tvDeadline = Date.now() + 4000;
+        while(Date.now() < tvDeadline){
+          let s2; try{ s2 = frame.contentWindow.__TVG_BRIDGE__.status(); }catch(e){ break; }
+          if(s2 && s2.tvCount > 0) break;
+          await new Promise(r => setTimeout(r, 150));
+        }
+        return frame;
+      }
       await new Promise(r => setTimeout(r, 200));
     }
     throw new Error('Trade Machine did not become ready in time (no salary data parsed).');
@@ -578,6 +678,7 @@ async function generate(){
 
   // One scenario per destination team; if none chosen, one "any" pass.
   const destSlugs = selectedToTeams.length ? selectedToTeams.map(slugify) : [''];
+  const tryPicks = $('tryPicks').checked;
 
   const byKey = new Map();   // key -> package (dedupe by the set of players involved)
   let attempts = 0, illegalSeen = 0;
@@ -588,7 +689,7 @@ async function generate(){
       const scn = { players: base.players, exclude: base.exclude, from: base.from, to: dest };
       let res;
       try{
-        res = frame.contentWindow.__TVG_BRIDGE__.run(scn);
+        res = frame.contentWindow.__TVG_BRIDGE__.run(scn, { tryPicks: tryPicks });
       }catch(e){
         setStatus('');
         showBanner('err', 'FAILED to read the Trade Machine result: ' + e.message + ' — refusing to fabricate a trade.');
@@ -605,6 +706,8 @@ async function generate(){
             verdict: res.verdict,
             balancePct: res.balancePct,
             hasPicks: res.hasPicks,
+            provenance: res.provenance || [],
+            anyFallback: !!res.anyFallback,
             key: res.key,
             destTeam: dest ? (selectedToTeams.find(t=>slugify(t)===dest) || dest) : null,
             selected: res.balancePct >= QUALITY_LINE_PCT   // filter recommends
@@ -656,6 +759,18 @@ function verdictTag(v){
   if(v.type === 'valid') return '<span class="tag clean">legal</span>';
   return '<span class="tag note">legal · notes</span>';
 }
+function fmtM(n){ return '$' + (Math.round(n/1e5)/10).toFixed(1) + 'M'; }
+function provBreakdownHtml(pkg){
+  const rows = (pkg.provenance||[]);
+  if(!rows.length) return '';
+  const inner = rows.map(r=>
+    `<div class="provrow">
+       <span>${escapeHtml(r.player)} <span style="color:#5d6b82">${escapeHtml(r.team||'')}</span></span>
+       <span class="val">${fmtM(r.value)}</span>
+       <span class="src ${r.source==='sheet'?'sheet':'fallback'}">${r.source==='sheet'?'sheet':'salary fallback'}</span>
+     </div>`).join('');
+  return `<details class="prov"><summary>value breakdown (${rows.length})</summary>${inner}</details>`;
+}
 function renderReview(){
   $('empty').style.display = 'none';
   $('reviewWrap').style.display = 'block';
@@ -667,11 +782,30 @@ function renderReview(){
     `Filter line ${QUALITY_LINE_PCT}% (TRADE_QUALITY_TOLERANCE ${TRADE_QUALITY_TOLERANCE}). `
     + `Packages at or above are pre-checked; below are listed dimmed — check to rescue.`;
 
+  // ---- per-batch provenance: which players have no trade-value sheet entry ----
+  const distinct = new Map();   // player -> source ('sheet' wins if seen anywhere)
+  collected.forEach(p=>(p.provenance||[]).forEach(r=>{
+    const prev = distinct.get(r.player);
+    if(prev !== 'sheet') distinct.set(r.player, r.source);
+  }));
+  const missing = [...distinct.entries()].filter(([,s])=>s==='salary').map(([n])=>n);
+  const M = distinct.size, N = missing.length;
+  const bp = $('batchProv');
+  if(M===0){ bp.textContent=''; }
+  else if(N===0){ bp.className='batchprov ok'; bp.textContent = `Trade values: all ${M} players had a trade-value sheet entry. Balance %s are sheet-based.`; }
+  else{
+    bp.className='batchprov';
+    bp.innerHTML = `⚠ Trade values: <b>${N} of ${M}</b> players had no trade-value entry (salary fallback used): `
+      + missing.map(escapeHtml).join(', ')
+      + `. Balance %s for packages using a fallback are approximate — add these names to your TV sheet.`;
+  }
+
   const list = $('reviewList');
   list.innerHTML = collected.map((pkg,i)=>{
     const low = pkg.balancePct < QUALITY_LINE_PCT;
-    const badgeCls = low ? 'low' : 'good';
+    const badgeCls = (low ? 'low' : 'good') + (pkg.anyFallback ? ' approx' : '');
     const picksTag = pkg.hasPicks ? '<span class="tag picks">picks</span>' : '';
+    const approx = pkg.anyFallback ? `<div class="approxnote">approx — balance built on salary fallback for ${(pkg.provenance||[]).filter(r=>r.source==='salary').length} player(s); missing trade values</div>` : '';
     const below = low ? `<div class="belowline">${pkg.balancePct}% — below the ${QUALITY_LINE_PCT}% filter line (check to rescue)</div>` : '';
     const note = (pkg.verdict && pkg.verdict.message && pkg.verdict.type !== 'valid')
       ? `<div class="notemsg">Engine note: ${escapeHtml(pkg.verdict.message)}</div>` : '';
@@ -684,7 +818,8 @@ function renderReview(){
           ${pkg.destTeam?`<span class="sends" style="font-size:11px">→ ${escapeHtml(pkg.destTeam)}</span>`:''}
         </div>
         <div class="summary">${packageSummaryHtml(pkg)}</div>
-        ${note}${below}
+        ${approx}${note}${below}
+        ${provBreakdownHtml(pkg)}
       </div>
     </div>`;
   }).join('');
@@ -696,16 +831,18 @@ function renderReview(){
     updateSelCount();
   }));
 
-  $('jsonDump').textContent = JSON.stringify(collected.map(p=>({balancePct:p.balancePct,hasPicks:p.hasPicks,verdict:p.verdict,tradeTeams:p.tradeTeams})), null, 2);
+  $('jsonDump').textContent = JSON.stringify(collected.map(p=>({balancePct:p.balancePct,hasPicks:p.hasPicks,anyFallback:p.anyFallback,provenance:p.provenance,verdict:p.verdict,tradeTeams:p.tradeTeams})), null, 2);
 
   // honest picks note based on what the engine actually emitted
   const picksHint = $('picksHint');
   if(anyPicks){
-    picksHint.innerHTML = 'Packages tagged <span class="tag picks">picks</span> include draft picks emitted by the engine.';
+    picksHint.innerHTML = 'Packages tagged <span class="tag picks">picks</span> include draft picks the engine attached (via <code>addPicksToTrade()</code> when “try to include picks” is on).';
+  }else if($('tryPicks').checked){
+    picksHint.textContent = 'No picks were attached: the engine’s addPicksToTrade() either found no Stepien-legal picks for the acquiring team, or every pick-sweetened version failed validation and was dropped (legal no-pick packages kept).';
   }else if(selectedToTeams.length){
-    picksHint.textContent = 'Note: with specific destination team(s) selected, the engine’s player→team path never attaches draft picks, so no package here contains picks. Leave destinations blank (“best offers”) to let the engine add picks.';
+    picksHint.textContent = 'Note: with specific destination team(s) selected, the engine’s player→team path never attaches draft picks on its own. Turn on “try to include picks” in the scenario to have the bridge call addPicksToTrade() after generation.';
   }else{
-    picksHint.textContent = 'No package in this batch included draft picks (the engine adds picks probabilistically on the player→any-team path).';
+    picksHint.textContent = 'No package in this batch included draft picks.';
   }
 
   updateSelCount();
@@ -803,17 +940,21 @@ function loadImage(url){
     img.src = proxied(url);
   });
 }
+// Build a "side" per team. ALL teams in the package are returned (not just 2),
+// so 3+ team trades render every team.
 function sidesFor(pkg){
-  const teams = (pkg && pkg.tradeTeams) ? pkg.tradeTeams.slice(0,2) : [];
+  const teams = (pkg && pkg.tradeTeams) ? pkg.tradeTeams : [];
   return teams.map(t=>{
-    const logo = (t.playersOut.find(p=>p.teamLogo)||{}).teamLogo || '';
+    const logo = ((t.playersOut||[]).find(p=>p.teamLogo)||{}).teamLogo
+              || ((t.playersIn||[]).find(p=>p.teamLogo)||{}).teamLogo || '';
     const chips = [];
     (t.playersOut||[]).forEach(p=>chips.push({ kind:'player', name:p.player, sub:(p.position||p.team||''),
       salary:p.salary||0, headshot:p.headshot||'' }));
     (t.picksOut||[]).forEach(pk=>chips.push({ kind:'pick', name:pickLabel(pk), sub:'Draft pick', salary:0, headshot:'' }));
     (t.rightsOut||[]).forEach(r=>chips.push({ kind:'rights', name:(r.playerName||pickLabel(r)), sub:'Draft rights', salary:0, headshot:'' }));
     const total = chips.reduce((s,c)=>s+c.salary,0);
-    return { teamName:t.teamName, color:teamColor(t.teamName), logo, chips, total };
+    const inSalary = (t.playersIn||[]).reduce((s,p)=>s+(p.salary||0),0);
+    return { teamName:t.teamName, color:teamColor(t.teamName), logo, chips, total, inSalary };
   });
 }
 async function preloadImagesFor(pkgs){
@@ -839,14 +980,17 @@ function getLayout(aspect){
 
 /* ------------------------------ timeline -------------------------------- */
 const CHIP_DUR = 0.55, CHIP_STAGGER = 0.34;
-function teamPhaseDur(n){ return Math.max(1.3, CHIP_STAGGER*Math.max(0,n-1) + CHIP_DUR + 0.25); }
+// Live chip timing — set per frame from the active plan/segment so the speed
+// multiplier and per-segment duration scaling flow into every drawing helper.
+let curChipDur = CHIP_DUR, curChipStagger = CHIP_STAGGER;
+function teamPhaseDurT(n, cd, cs){ return Math.max(1.0, cs*Math.max(0,n-1) + cd + 0.25); }
 
 /* ----------------------- animated running totals ------------------------ */
 function animatedTotal(side, phaseStart, t){
   let sum=0;
   side.chips.forEach((c,i)=>{
-    const s = phaseStart + i*CHIP_STAGGER;
-    sum += c.salary * clamp01((t - s)/CHIP_DUR);
+    const s = phaseStart + i*curChipStagger;
+    sum += c.salary * clamp01((t - s)/curChipDur);
   });
   return sum;
 }
@@ -948,22 +1092,90 @@ function drawTeamHeader(c,col,side,dollars){
   c.fillText(formatSalary(Math.round(dollars)), col.x+col.w, y+34);
 }
 
-function drawTeamChips(c,col,side,phaseStart,t,layout){
+// Draw a team's chips inside an arbitrary region {x,y,w,h,from}, capped at capH.
+function drawTeamChips(c,region,side,phaseStart,t,capH){
   const n=side.chips.length; if(!n) return;
-  const gap=14;
-  const chipH=Math.min(layout.aspect==='1:1'?104:120, (col.h-gap*(n-1))/n);
+  const gap=region.h<280?9:14;
+  const chipH=Math.min(capH, (region.h-gap*(n-1))/n);
   const totalH=chipH*n+gap*(n-1);
-  const startY=col.y + Math.max(0,(col.h-totalH)/2);
+  const startY=region.y + Math.max(0,(region.h-totalH)/2);
   side.chips.forEach((chip,i)=>{
-    const cs=phaseStart + i*CHIP_STAGGER;
-    const p=clamp01((t-cs)/CHIP_DUR);
+    const cs=phaseStart + i*curChipStagger;
+    const p=clamp01((t-cs)/curChipDur);
     if(p<=0) return;
     const e=easeOutCubic(p);
-    const offDir = col.from==='left' ? -1 : 1;
-    const offX = offDir*(1-e)*(col.w+200);
-    const x=col.x+offX, y=startY+i*(chipH+gap);
-    drawChip(c,x,y,col.w,chipH,chip,side.color,e);
+    const offDir = region.from==='left' ? -1 : 1;
+    const offX = offDir*(1-e)*(region.w+200);
+    const x=region.x+offX, y=startY+i*(chipH+gap);
+    drawChip(c,x,y,region.w,chipH,chip,side.color,e);
   });
+}
+
+/* ---------------- N-team board: blocks + per-team in/out deltas ---------- */
+const COMPACT_HEADER = 56;
+// Returns {mode:'meter'|'deltas', blocks:[{x,y,w,h,from,compact}], meter|null}
+function getTeamBlocks(layout, n){
+  const a=layout.aspect;
+  if(n<=2){
+    if(a==='1:1') return { mode:'meter', meter:{x:60,y:892,w:960,h:150},
+      blocks:[{x:36,y:214,w:492,h:646,from:'left',compact:false},{x:552,y:214,w:492,h:646,from:'right',compact:false}] };
+    return { mode:'meter', meter:{x:80,y:856,w:920,h:236},
+      blocks:[{x:54,y:236,w:972,h:560,from:'left',compact:false},{x:54,y:1150,w:972,h:560,from:'right',compact:false}] };
+  }
+  // 3+ teams -> stacked compact rows, per-team in/out deltas in each header
+  const top = a==='1:1' ? 150 : 250;
+  const bottom = a==='1:1' ? 1052 : 1880;
+  const gap = a==='1:1' ? 16 : 22;
+  const x = a==='1:1' ? 40 : 54;
+  const w = a==='1:1' ? 1000 : 972;
+  const h = (bottom - top - gap*(n-1))/n;
+  const blocks=[];
+  for(let i=0;i<n;i++) blocks.push({ x, y: top+i*(h+gap), w, h, from:(i%2?'right':'left'), compact:true });
+  return { mode:'deltas', blocks, meter:null };
+}
+
+// Compact in-block header with the team's animated OUT and IN totals (delta).
+function drawCompactHeader(c, block, side, phaseStart, t){
+  const y=block.y+6;
+  const logo=side.logo?imageCache.get(side.logo):null;
+  let tx=block.x+4;
+  if(logo){ c.drawImage(logo,block.x+4,y,40,40); tx=block.x+52; }
+  else { c.beginPath(); c.arc(block.x+24,y+20,20,0,Math.PI*2); c.fillStyle=side.color; c.fill(); tx=block.x+52; }
+  c.fillStyle='#ffffff'; c.textAlign='left'; c.textBaseline='alphabetic';
+  const fs=fitFont(c,side.teamName,block.w*0.5,28,800); F(c,800,fs);
+  c.fillText(side.teamName, tx, y+28);
+  // OUT / IN deltas, right-aligned
+  const out=animatedTotal(side, phaseStart, t);
+  const span=curChipStagger*Math.max(0,side.chips.length-1)+curChipDur;
+  const inProg=clamp01((t-phaseStart)/Math.max(0.001,span));
+  const inAmt=(side.inSalary||0)*inProg;
+  c.textAlign='right';
+  c.fillStyle='#ffffff'; F(c,700,22); c.fillText('OUT '+formatSalary(Math.round(out)), block.x+block.w-12, y+18);
+  c.fillStyle='#a29bfe'; F(c,700,20); c.fillText('IN '+formatSalary(Math.round(inAmt)), block.x+block.w-12, y+42);
+  // divider
+  c.strokeStyle='rgba(255,255,255,0.10)'; c.lineWidth=1;
+  c.beginPath(); c.moveTo(block.x, block.y+COMPACT_HEADER-4); c.lineTo(block.x+block.w, block.y+COMPACT_HEADER-4); c.stroke();
+}
+
+function drawTeamBlock(c, block, side, phaseStart, t, layout){
+  if(block.compact){
+    drawCompactHeader(c, block, side, phaseStart, t);
+    const region={ x:block.x, y:block.y+COMPACT_HEADER, w:block.w, h:block.h-COMPACT_HEADER-4, from:block.from };
+    const capH = layout.aspect==='1:1' ? 76 : 96;
+    drawTeamChips(c, region, side, phaseStart, t, capH);
+  } else {
+    drawTeamHeader(c, block, side, animatedTotal(side, phaseStart, t));
+    if(t>=phaseStart) drawTeamChips(c, block, side, phaseStart, t, layout.aspect==='1:1'?104:120);
+  }
+}
+
+// Draw all team blocks + either the 2-side meter (n==2) or rely on per-team deltas (n>=3).
+function drawTeamsStage(c, layout, sides, teamStarts, t, settleStart, settleEnd){
+  const info = getTeamBlocks(layout, sides.length);
+  sides.forEach((side,i)=>{ drawTeamBlock(c, info.blocks[i], side, teamStarts[i], t, layout); });
+  if(info.mode==='meter' && sides.length===2){
+    drawMeter(c, info.meter, sides, teamStarts[0], teamStarts[1], t, settleStart, settleEnd, layout);
+  }
 }
 
 function drawMeter(c,m,sides,aStart,bStart,t,settleStart,settleEnd,layout){
@@ -1031,17 +1243,28 @@ function wrapText(c,text,cx,y,maxW,lh,maxLines){
 }
 
 /* ===================== SINGLE-PACKAGE TIMELINE (quiz ok) ================= */
-function buildSingleTimeline(sides, quizMode){
-  const nA = sides[0]?sides[0].chips.length:0;
-  const nB = sides[1]?sides[1].chips.length:0;
-  const phases = [ {key:'hook',dur:1.25}, {key:'teamA',dur:teamPhaseDur(nA)} ];
-  if(quizMode) phases.push({key:'gate',dur:1.9});
-  phases.push({key:'teamB',dur:teamPhaseDur(nB)});
-  phases.push({key:'meter',dur:1.4});
-  phases.push({key:'verdict',dur:1.6});
-  phases.push({key:'end',dur:1.5});
-  let t=0; const win={}; phases.forEach(p=>{ win[p.key]={s:t,e:t+p.dur}; t+=p.dur; });
-  return { win, total:t, hasGate:!!quizMode, nA, nB };
+// N teams: hook -> team0..teamN-1 (gate before the last team when quiz) -> meter -> verdict -> end.
+function buildSingleTimeline(sides, quizMode, chipDur, chipStagger){
+  const n = sides.length;
+  let t=0; const win={ teams:[] };
+  win.hook={s:0,e:1.25}; t=1.25;
+  for(let i=0;i<n;i++){
+    if(quizMode && i===n-1){ win.gate={s:t,e:t+1.9}; t+=1.9; }
+    const d=teamPhaseDurT(sides[i].chips.length, chipDur, chipStagger);
+    win.teams.push({s:t,e:t+d}); t+=d;
+  }
+  win.meter={s:t,e:t+1.4}; t+=1.4;
+  win.verdict={s:t,e:t+1.6}; t+=1.6;
+  win.end={s:t,e:t+1.5}; t+=1.5;
+  return { win, total:t, hasGate:!!quizMode };
+}
+// scale every {s,e} window (and nested arrays) by f — keeps proportions at any duration.
+function scaleWin(w,f){
+  if(Array.isArray(w)){ w.forEach(x=>scaleWin(x,f)); }
+  else if(w && typeof w==='object'){
+    if('s' in w && 'e' in w){ w.s*=f; w.e*=f; }
+    else { for(const k in w) scaleWin(w[k],f); }
+  }
 }
 
 function drawHook(c,layout,alpha,t,sides){
@@ -1071,7 +1294,7 @@ function drawHook(c,layout,alpha,t,sides){
   c.fillText('VS', layout.W/2, cy);
   c.restore();
 }
-function drawGate(c,layout,t,dur,sides){
+function drawGate(c,layout,t,dur,teamName){
   const a=t<0.3?t/0.3:t>dur-0.3?clamp01((dur-t)/0.3):1;
   c.save(); c.globalAlpha=a; c.fillStyle='rgba(15,12,41,0.9)'; c.fillRect(0,0,layout.W,layout.H);
   const pulse=1+Math.sin(t*4)*0.03;
@@ -1079,9 +1302,8 @@ function drawGate(c,layout,t,dur,sides){
   c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
   F(c,800,52); c.fillText('What completes', 0,-70);
   F(c,800,52); c.fillText('this trade?', 0,-6);
-  const teamB=sides[1]?sides[1].teamName:'';
-  c.fillStyle='#a29bfe'; const fs=fitFont(c,teamB,layout.W-160,46,700); F(c,700,fs);
-  c.fillText(teamB, 0, 70);
+  c.fillStyle='#a29bfe'; const fs=fitFont(c,teamName||'',layout.W-160,46,700); F(c,700,fs);
+  c.fillText(teamName||'', 0, 70);
   c.fillStyle='rgba(255,255,255,0.6)'; F(c,500,30); c.fillText('🤔', 0, 150);
   c.restore();
 }
@@ -1117,32 +1339,26 @@ function drawEndCard(c,layout,alpha){
 
 function drawSingleFrame(elapsed){
   const c=ctx, layout=R.layout, tl=R.timeline, win=tl.win, sides=R.sides, pkg=R.pkg;
+  curChipDur=R.chipDur; curChipStagger=R.chipStagger;
   drawBackground(c,layout);
+  const teamStarts = win.teams.map(w=>w.s);
+  const lastEnd = win.teams[win.teams.length-1].e;
   const afterHook = elapsed >= win.hook.e-0.3;
   const layoutA = clamp01((elapsed-(win.hook.e-0.3))/0.4);
   if(afterHook){
     c.globalAlpha=layoutA;
     c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?34:42);
-    c.fillText('WOULD YOU DO THIS TRADE?', layout.W/2, layout.titleY);
-    if(sides[0]){
-      drawTeamHeader(c,layout.cols[0],sides[0],animatedTotal(sides[0],win.teamA.s,elapsed));
-      drawTeamChips(c,layout.cols[0],sides[0],win.teamA.s,elapsed,layout);
-    }
-    if(sides[1]){
-      const bShown = elapsed>=win.teamB.s;
-      drawTeamHeader(c,layout.cols[1],sides[1], bShown?animatedTotal(sides[1],win.teamB.s,elapsed):0);
-      if(bShown) drawTeamChips(c,layout.cols[1],sides[1],win.teamB.s,elapsed,layout);
-    }
-    drawMeter(c,layout.meter,sides,win.teamA.s,win.teamB.s,elapsed,win.meter.s,win.meter.e,layout);
-    if(elapsed>=win.teamB.e-0.2) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(win.teamB.e-0.2))/0.4));
+    c.fillText('WOULD YOU DO THIS TRADE?', layout.W/2, layout.aspect==='1:1'?112:layout.titleY); // clear the top balance badge on square
+    drawTeamsStage(c,layout,sides,teamStarts,elapsed,win.meter.s,win.meter.e);
+    if(elapsed>=lastEnd-0.2) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(lastEnd-0.2))/0.4));
     c.globalAlpha=1;
   }
   if(elapsed<win.hook.e){
     const a = elapsed<0.3?elapsed/0.3 : elapsed>win.hook.e-0.3?clamp01((win.hook.e-elapsed)/0.3):1;
     drawHook(c,layout,a,elapsed,sides);
   }
-  if(tl.hasGate && elapsed>=win.gate.s && elapsed<win.gate.e){
-    drawGate(c,layout,elapsed-win.gate.s,win.gate.e-win.gate.s,sides);
+  if(tl.hasGate && win.gate && elapsed>=win.gate.s && elapsed<win.gate.e){
+    drawGate(c,layout,elapsed-win.gate.s,win.gate.e-win.gate.s, sides[sides.length-1].teamName);
   }
   if(elapsed>=win.verdict.s){ drawVerdict(c,layout,elapsed-win.verdict.s,pkg); }
   if(elapsed>=win.end.s){ drawEndCard(c,layout,clamp01((elapsed-win.end.s)/0.4)); }
@@ -1151,21 +1367,22 @@ function drawSingleFrame(elapsed){
 
 /* ===================== MULTI-SEGMENT TIMELINE (countdown) ================ */
 const SEG_HOLD = 1.0;     // hold after the legal stamp
-const INTRO_DUR = 2.2, FINAL_DUR = 2.8, WIPE = 0.32;
+const WIPE = 0.32;
 
-function buildSegment(pkg){
+// Build a segment (label -> team0..teamN-1 -> meter -> stamp -> hold) at the
+// given chip timing, then it is scaled to the requested seconds-per-segment.
+function buildSegment(pkg, chipDur, chipStagger){
   const sides = sidesFor(pkg);
-  const nA = sides[0]?sides[0].chips.length:0;
-  const nB = sides[1]?sides[1].chips.length:0;
-  const label = 0.9;
-  const teamA = teamPhaseDur(nA);
-  const teamB = teamPhaseDur(nB);
-  const meter = 0.9;
-  const stamp = 1.1;
-  let t=0; const win={};
-  [['label',label],['teamA',teamA],['teamB',teamB],['meter',meter],['stamp',stamp],['hold',SEG_HOLD]]
-    .forEach(([k,d])=>{ win[k]={s:t,e:t+d}; t+=d; });
-  return { pkg, sides, win, dur:t };
+  let t=0; const win={ teams:[] };
+  win.label={s:0,e:0.9}; t=0.9;
+  for(let i=0;i<sides.length;i++){
+    const d=teamPhaseDurT(sides[i].chips.length, chipDur, chipStagger);
+    win.teams.push({s:t,e:t+d}); t+=d;
+  }
+  win.meter={s:t,e:t+0.9}; t+=0.9;
+  win.stamp={s:t,e:t+1.1}; t+=1.1;
+  win.hold={s:t,e:t+SEG_HOLD}; t+=SEG_HOLD;
+  return { pkg, sides, win, dur:t, chipDur, chipStagger };
 }
 
 function drawIntroCard(c,layout,alpha,t){
@@ -1191,6 +1408,7 @@ function drawIntroCard(c,layout,alpha,t){
 
 function drawSegment(c,layout,seg,t,optionNumber){
   const win=seg.win, sides=seg.sides, pkg=seg.pkg;
+  curChipDur=seg.chipDur; curChipStagger=seg.chipStagger;
   // segment wipe: fade content in at start, out at end
   const fadeIn = clamp01(t/WIPE);
   const fadeOut = clamp01((seg.dur - t)/WIPE);
@@ -1205,16 +1423,8 @@ function drawSegment(c,layout,seg,t,optionNumber){
     // small option tag, top-left
     c.fillStyle='#a29bfe'; c.textAlign='left'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?30:36);
     c.fillText('OPTION ' + optionNumber, 40, layout.titleY);
-    if(sides[0]){
-      drawTeamHeader(c,layout.cols[0],sides[0],animatedTotal(sides[0],win.teamA.s,t));
-      drawTeamChips(c,layout.cols[0],sides[0],win.teamA.s,t,layout);
-    }
-    if(sides[1]){
-      const bShown = t>=win.teamB.s;
-      drawTeamHeader(c,layout.cols[1],sides[1], bShown?animatedTotal(sides[1],win.teamB.s,t):0);
-      if(bShown) drawTeamChips(c,layout.cols[1],sides[1],win.teamB.s,t,layout);
-    }
-    drawMeter(c,layout.meter,sides,win.teamA.s,win.teamB.s,t,win.meter.s,win.meter.e,layout);
+    const teamStarts = win.teams.map(w=>w.s);
+    drawTeamsStage(c,layout,sides,teamStarts,t,win.meter.s,win.meter.e);
     if(t>=win.meter.s) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((t-win.meter.s)/0.4));
     if(t>=win.stamp.s) drawLegalStamp(c,layout,pkg.verdict, t-win.stamp.s);
     c.restore();
@@ -1284,26 +1494,49 @@ function drawMultiFrame(elapsed){
   drawVignetteNoise(c,layout);
 }
 
+/* ------------------------ duration controls (read at render time) -------- */
+function num(id, def){ const v=parseFloat($(id).value); return isNaN(v)?def:v; }
+function readTiming(){
+  const speed = Math.max(0.5, Math.min(2, num('tSpeed',1) || 1));
+  return {
+    speed,
+    chipDur: CHIP_DUR/speed,
+    chipStagger: CHIP_STAGGER/speed,
+    secPerSeg: Math.max(2, num('tSeg',6.5)),
+    introDur: Math.max(0.5, num('tIntro',2.2)),
+    finalDur: Math.max(0.5, num('tFinal',2.8)),
+    singleDur: (()=>{ const v=parseFloat($('tSingle').value); return (isNaN(v)||v<=0)?null:v; })()
+  };
+}
+
 /* ------------------------ build the active render plan ------------------- */
 function prepareRenderFromSelection(){
   const aspect = getAspect();
   const layout = getLayout(aspect);
   canvas.width = layout.W; canvas.height = layout.H;
+  const T = readTiming();
 
   const sel = selectedPackages();
   if(sel.length <= 1){
     const pkg = sel[0] || collected[0];
     const sides = sidesFor(pkg);
     const quiz = $('quizMode').checked && sel.length===1;
-    R = { mode:'single', layout, pkg, sides, timeline:buildSingleTimeline(sides, quiz) };
-    R.total = R.timeline.total;
+    const tl = buildSingleTimeline(sides, quiz, T.chipDur, T.chipStagger);
+    let chipDur=T.chipDur, chipStagger=T.chipStagger;
+    if(T.singleDur){ const f=T.singleDur/tl.total; scaleWin(tl.win,f); tl.total*=f; chipDur*=f; chipStagger*=f; }
+    R = { mode:'single', layout, pkg, sides, timeline:tl, chipDur, chipStagger, total:tl.total };
   } else {
     // countdown order: lowest balance first, best last
     const order = sel.slice().sort((a,b)=> a.balancePct - b.balancePct);
-    const segments = order.map(buildSegment);
-    let t = INTRO_DUR;
+    const segments = order.map(p=>{
+      const seg = buildSegment(p, T.chipDur, T.chipStagger);
+      const f = T.secPerSeg/seg.dur;                  // scale to requested seconds/segment
+      scaleWin(seg.win,f); seg.dur=T.secPerSeg; seg.chipDur*=f; seg.chipStagger*=f;
+      return seg;
+    });
+    let t = T.introDur;
     segments.forEach(s=>{ s.s=t; s.e=t+s.dur; t+=s.dur; });
-    R = { mode:'multi', layout, segments, introEnd:INTRO_DUR, finalStart:t, total:t+FINAL_DUR };
+    R = { mode:'multi', layout, segments, introEnd:T.introDur, finalStart:t, total:t+T.finalDur };
   }
   return R;
 }
@@ -1384,6 +1617,7 @@ document.querySelectorAll('#aspectSeg button').forEach(b=>b.addEventListener('cl
   b.classList.add('active'); if(collected.length) renderStaticPreview().catch(()=>{});
 }));
 $('quizMode').addEventListener('change',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); });
+['tSeg','tSingle','tIntro','tFinal','tSpeed'].forEach(id=>$(id).addEventListener('input',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); }));
 $('previewBtn').addEventListener('click', async ()=>{
   if(!selectedPackages().length){ setRenderStatus('Select a package first.'); return; }
   setRenderStatus('Previewing…');
