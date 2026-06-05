@@ -78,6 +78,8 @@
   .field input[type=text],.field select.team-select{width:100%;border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:14px;background:var(--surface);color:var(--text);font-family:inherit;height:40px;transition:border-color .15s,box-shadow .15s}
   .field input[type=text]::placeholder,.field select.team-select option[value=""]{color:var(--muted)}
   .field input[type=text]:focus,.field select.team-select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-dim)}
+  .field select.team-select:disabled{background-color:var(--surface2);color:var(--text);cursor:not-allowed;opacity:1}
+  .field select.team-select:disabled + .field-lock-hint{display:block}
   .field select.team-select{appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%236e6e73' d='M6 8L0 0h12z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px;cursor:pointer}
   .field .results{position:absolute;top:100%;left:0;right:0;margin-top:4px;background:var(--surface);border:1px solid var(--border);border-radius:7px;max-height:200px;overflow-y:auto;z-index:20;box-shadow:0 6px 18px rgba(0,0,0,.10)}
   .field .results .row{padding:8px 12px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;border-bottom:1px solid var(--border)}
@@ -381,7 +383,7 @@ function fillTeamSelects(){
 }
 
 /* ----------------------------- picker UI --------------------------------- */
-function wirePlayerSearch(inputId, resultsId, list, chipsId){
+function wirePlayerSearch(inputId, resultsId, list, chipsId, onChange){
   const input = $(inputId), results = $(resultsId);
   function render(){
     const q = input.value.trim().toLowerCase();
@@ -399,23 +401,33 @@ function wirePlayerSearch(inputId, resultsId, list, chipsId){
          <span class="sal">${formatSalary(p.salary)}</span></div>`).join('');
     results.querySelectorAll('.row').forEach(row => row.addEventListener('click', ()=>{
       const p = pickerPlayers.find(x => x.player === row.dataset.p);
-      if(p){ list.push(p); renderPlayerChips(chipsId, list); render(); }
+      if(p){
+        list.push(p);
+        renderPlayerChips(chipsId, list, onChange);
+        // Reset the input back to empty after selection — otherwise the
+        // partial query ("Mi") lingers and looks like an unfinished pick.
+        input.value = '';
+        results.style.display = 'none';
+        if (onChange) onChange();
+      }
     }));
   }
   input.addEventListener('input', render);
   input.addEventListener('focus', render);
 }
-function renderPlayerChips(chipsId, list){
+function renderPlayerChips(chipsId, list, onChange){
   const el = $(chipsId);
   el.innerHTML = list.map((p,i)=>
     `<span class="chip">${escapeHtml(p.player)} <span class="x" data-i="${i}">✕</span></span>`).join('');
   el.querySelectorAll('.x').forEach(x => x.addEventListener('click', ()=>{
-    list.splice(parseInt(x.dataset.i),1); renderPlayerChips(chipsId, list);
+    list.splice(parseInt(x.dataset.i),1);
+    renderPlayerChips(chipsId, list, onChange);
+    if (onChange) onChange();
   }));
 }
 
 // Destination team multi-picker (chips, mirrors the exclude picker but for teams)
-function wireTeamSearch(inputId, resultsId, list, chipsId){
+function wireTeamSearch(inputId, resultsId, list, chipsId, onChange){
   const input = $(inputId), results = $(resultsId);
   function render(){
     const q = input.value.trim().toLowerCase();
@@ -429,19 +441,51 @@ function wireTeamSearch(inputId, resultsId, list, chipsId){
     results.innerHTML = matches.map(t =>
       `<div class="row" data-t="${escapeHtml(t)}"><span>${escapeHtml(t)}</span></div>`).join('');
     results.querySelectorAll('.row').forEach(row => row.addEventListener('click', ()=>{
-      list.push(row.dataset.t); renderTeamChips(chipsId, list); render();
+      list.push(row.dataset.t);
+      renderTeamChips(chipsId, list, onChange);
+      input.value = '';
+      results.style.display = 'none';
+      if (onChange) onChange();
     }));
   }
   input.addEventListener('input', render);
   input.addEventListener('focus', render);
 }
-function renderTeamChips(chipsId, list){
+function renderTeamChips(chipsId, list, onChange){
   const el = $(chipsId);
   el.innerHTML = list.map((t,i)=>
     `<span class="chip">${escapeHtml(t)} <span class="x" data-i="${i}">✕</span></span>`).join('');
   el.querySelectorAll('.x').forEach(x => x.addEventListener('click', ()=>{
-    list.splice(parseInt(x.dataset.i),1); renderTeamChips(chipsId, list);
+    list.splice(parseInt(x.dataset.i),1);
+    renderTeamChips(chipsId, list, onChange);
+    if (onChange) onChange();
   }));
+}
+
+// Auto-lock the FROM team field to the selected player(s)'s team. If all
+// selected players come from the same team, lock FROM to that team —
+// Giannis is on Milwaukee, you can't trade him "from Boston." If the
+// selection is empty or spans multiple teams, leave FROM unlocked.
+function updateFromTeamLock(){
+  const fromSel = $('fromTeam');
+  if (!fromSel) return;
+  if (selectedPlayers.length === 0) {
+    fromSel.disabled = false;
+    return;
+  }
+  const teams = new Set(selectedPlayers.map(p => p.team));
+  if (teams.size === 1) {
+    const team = [...teams][0];
+    // Set the value only if the option exists (defensive — teams list is
+    // loaded asynchronously, the option should always exist by the time a
+    // player is pickable, but better safe).
+    if ([...fromSel.options].some(o => o.value === team)) {
+      fromSel.value = team;
+    }
+    fromSel.disabled = true;
+  } else {
+    fromSel.disabled = false;
+  }
 }
 
 /* =====================================================================
@@ -956,6 +1000,23 @@ function renderReview(){
   updateSelCount();
   prepareRenderFromSelection();
   renderStaticPreview().catch(()=>{});
+
+  // Auto-record the video with current defaults so the "second block"
+  // canvas actually animates rather than showing a static frame. No file
+  // is downloaded automatically — the recording lands in the <video>
+  // element below the canvas for playback. The ⬤ Render button still
+  // downloads explicitly. setTimeout lets the layout settle (chip render,
+  // font load) before MediaRecorder starts capturing the canvas stream.
+  if (selectedPackages().length > 0 && window.MediaRecorder && !animating) {
+    setTimeout(() => {
+      if (animating) return;
+      setRenderStatus('Recording video with default settings…');
+      runAnimation(true, false).catch(e => {
+        setRenderStatus('Auto-record error: ' + (e && e.message ? e.message : String(e)));
+        animating = false;
+      });
+    }, 300);
+  }
 }
 function selectedPackages(){ return collected.filter(p=>p.selected); }
 function updateSelCount(){
@@ -1660,7 +1721,12 @@ async function ensureFonts(){
   }catch(e){/* fall back to sans-serif */}
 }
 
-function runAnimation(record){
+function runAnimation(record, doDownload){
+  // doDownload defaults true (existing call-sites unaffected). The auto-
+  // render after renderReview() passes false so the user gets a playable
+  // <video> in the second block without a surprise file download every
+  // time they generate. The Render button still downloads explicitly.
+  if (doDownload === undefined) doDownload = true;
   return new Promise(async (resolve,reject)=>{
     if(animating) return resolve();
     if(!selectedPackages().length){ return reject(new Error('Select at least one package')); }
@@ -1683,11 +1749,15 @@ function runAnimation(record){
         const blob=new Blob(chunks,{type:'video/webm'});
         const url=URL.createObjectURL(blob);
         const v=$('out'); v.src=url; v.style.display='block';
-        const a=document.createElement('a'); a.href=url;
-        const n=selectedPackages().length;
-        a.download=`trade-${n>1?n+'pkg-':''}${getAspect().replace(':','x')}.webm`;
-        document.body.appendChild(a); a.click(); a.remove();
-        setRenderStatus('Saved '+a.download+' — check it plays above.');
+        if (doDownload) {
+          const a=document.createElement('a'); a.href=url;
+          const n=selectedPackages().length;
+          a.download=`trade-${n>1?n+'pkg-':''}${getAspect().replace(':','x')}.webm`;
+          document.body.appendChild(a); a.click(); a.remove();
+          setRenderStatus('Saved '+a.download+' — check it plays above.');
+        } else {
+          setRenderStatus('Video ready — click ⬤ Render to save the .webm file.');
+        }
         animating=false; resolve();
       };
       recorder.start();
@@ -1741,7 +1811,7 @@ $('renderBtn').addEventListener('click', async ()=>{
 });
 
 /* ------------------------------- wiring ------------------------------- */
-wirePlayerSearch('playerSearch', 'playerResults', selectedPlayers, 'playerChips');
+wirePlayerSearch('playerSearch', 'playerResults', selectedPlayers, 'playerChips', updateFromTeamLock);
 wirePlayerSearch('excludeSearch', 'excludeResults', excludedPlayers, 'excludeChips');
 wireTeamSearch('toSearch', 'toResults', selectedToTeams, 'toChips');
 $('genBtn').addEventListener('click', generate);
