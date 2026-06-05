@@ -97,6 +97,8 @@
   .balance-input>span{color:var(--muted);font-weight:500;white-space:nowrap}
   .balance-input input{width:54px;padding:5px 7px;border:1px solid var(--border);border-radius:5px;font:600 13px/1 system-ui,sans-serif;background:#fff;color:var(--text);text-align:center}
   .balance-input input:focus{outline:none;border-color:var(--accent)}
+  .balance-input select{padding:5px 8px;border:1px solid var(--border);border-radius:5px;font:600 12.5px/1 system-ui,sans-serif;background:#fff;color:var(--text);cursor:pointer}
+  .balance-input select:focus{outline:none;border-color:var(--accent)}
   .secondary-row .banner{margin-top:0;margin-left:auto;max-width:60%}
   .secondary-row #status{margin-top:0}
   /* responsive: stack inputs on narrow screens */
@@ -212,13 +214,17 @@
         <input type="checkbox" id="tryPicks">
         <span>Try to include draft picks <span style="color:var(--muted);font-size:11px">(reverts if illegal)</span></span>
       </label>
-      <label class="balance-input" title="Minimum balance % the FROM team (giving up the star) must clear. Lower = FROM willing to lose more value.">
-        <span>FROM min %</span>
-        <input type="number" id="fromMinPct" min="50" max="100" value="85" step="1">
+      <label class="balance-input" title="Lowest balance % a trade must hit to be auto-checked. Lower = more lopsided trades qualify. 100% means only perfectly balanced trades.">
+        <span>Min balance</span>
+        <input type="number" id="minBalancePct" min="50" max="100" value="85" step="5"><span style="margin-left:-3px;color:var(--muted)">%</span>
       </label>
-      <label class="balance-input" title="Minimum balance % the TO team (receiving) must clear. Higher = TO can't lose value.">
-        <span>TO min %</span>
-        <input type="number" id="toMinPct" min="50" max="100" value="85" step="1">
+      <label class="balance-input" title="Selling team = the team giving up your selected player(s). 'Can't lose' means they must come out value-neutral or better. 'Can't win' means they must come out value-neutral or worse.">
+        <span>Selling team</span>
+        <select id="sellingDirection">
+          <option value="any">No constraint</option>
+          <option value="cantlose">Can't lose</option>
+          <option value="cantwin">Can't win</option>
+        </select>
       </label>
       <div id="status">Loading live salary data for pickers…</div>
       <div id="banner" class="banner"></div>
@@ -318,32 +324,43 @@ const IMAGE_PROXY   = 'https://hoopshype-rumors-api.thejorgesierra.workers.dev/a
 const TM_LIVE_ORIGIN = 'https://nba-trade-calculator.thejorgesierra.workers.dev'; // same-origin fast path
 
 /* ------------------------------- tuning ---------------------------------- */
-// The review filter "recommends" (pre-checks) trades whose balance is within
-// this tolerance of perfect. 0.15 => recommend balance >= 85%. The user can
-// always rescue a dimmed sub-line trade; the filter only recommends.
-// Per-side overrides come from the UI (fromMinPct / toMinPct inputs); these
-// constants are the defaults seeded into those inputs at page load.
+// The review filter "recommends" (pre-checks) trades whose balance meets the
+// user-set minimum. QUALITY_LINE_PCT (85%) is the default seeded into the
+// UI; once the page loads, the live value comes from the minBalancePct input.
+// An optional directional constraint on the selling team (Can't lose /
+// Can't win) further refines the auto-selection — see pkgPassesFilter.
 const TRADE_QUALITY_TOLERANCE = 0.15;
 const QUALITY_LINE_PCT = Math.round((1 - TRADE_QUALITY_TOLERANCE) * 100); // 85
 const ATTEMPTS_PER_DEST = 24;   // cap per destination team (or total if none chosen)
 
-// Read the per-side thresholds from the UI. Defaults 85/85 = current
-// symmetric behavior; bump TO to 100 for "opponent can't lose value"
-// scenarios (e.g. the FROM team gives up a star and absorbs the value loss).
-function getFromMinPct(){
-  const v = parseInt(($('fromMinPct')||{}).value, 10);
-  return Number.isFinite(v) ? Math.max(50, Math.min(100, v)) : QUALITY_LINE_PCT;
-}
-function getToMinPct(){
-  const v = parseInt(($('toMinPct')||{}).value, 10);
+// Read the min-balance threshold from the UI. Default 85; 100 means "only
+// perfectly balanced trades qualify." This is the floor regardless of
+// direction — packages below it never pre-check.
+function getMinBalancePct(){
+  const v = parseInt(($('minBalancePct')||{}).value, 10);
   return Number.isFinite(v) ? Math.max(50, Math.min(100, v)) : QUALITY_LINE_PCT;
 }
 
-// Identify which side gives up more value (the "losing" side). For 2-team
-// trades this is unambiguous; the FROM team is whichever holds one of the
-// user's selectedPlayers in playersOut. For 3+ team trades or scenarios
-// without selectedPlayers, return 'unknown' and let the caller fall back
-// to the symmetric (min-of-thresholds) check.
+// Read the directional constraint on the SELLING team (= FROM team, the one
+// holding the user's selected player(s)). Three states:
+//   'any'      → no direction check (any losing side is OK)
+//   'cantlose' → selling team must come out value-neutral or better (FROM
+//                gives <= TO gives). Eliminates packages where the seller
+//                is "losing" value.
+//   'cantwin'  → selling team must come out value-neutral or worse (FROM
+//                gives >= TO gives). Eliminates packages where the seller
+//                gets back more than they give up. Useful for "we're moving
+//                this guy and don't want to look like robbers" scenarios.
+function getSellingDirection(){
+  const el = $('sellingDirection');
+  return (el && el.value) || 'any';
+}
+
+// Identify which side gives up more value (the "losing" side). Returns:
+//   'from'     — FROM team gives more (= they're "losing" value)
+//   'to'       — TO team gives more (= FROM is "winning" value)
+//   'balanced' — exact tie (rare, but distinct from above for direction check)
+//   'unknown'  — can't determine (3+ team trade, no selected player, etc.)
 function detectLosingSide(res){
   if(!res||!res.teamValuesOut||res.teamValuesOut.length<2)return 'unknown';
   if(res.teamValuesOut.length!==2)return 'unknown';
@@ -358,20 +375,33 @@ function detectLosingSide(res){
   const fromV=res.teamValuesOut[fromIdx].valueOut;
   const toV=res.teamValuesOut[1-fromIdx].valueOut;
   if(fromV<=0||toV<=0)return 'unknown';
-  // The team with more valueOut is the one "losing" — they're giving more
-  // than they're getting back. balancePct equals that side's retention.
   if(fromV>toV)return 'from';
   if(toV>fromV)return 'to';
-  return 'from'; // exact tie — treat as FROM's call
+  return 'balanced';
 }
 
-// Whether a package passes the auto-select filter under the current
-// asymmetric thresholds. The losing side's balance must clear its own
-// threshold; unknown losing side falls back to the weaker threshold.
-function pkgPassesFilter(pkg,fromThresh,toThresh){
-  if(pkg.losingSide==='from')return pkg.balancePct>=fromThresh;
-  if(pkg.losingSide==='to')return pkg.balancePct>=toThresh;
-  return pkg.balancePct>=Math.min(fromThresh,toThresh);
+// Whether a package passes the auto-select filter under the current settings.
+// Two independent gates: (A) min-balance floor and (B) optional direction
+// constraint on the selling side. Both must pass.
+function pkgPassesFilter(pkg){
+  const minPct = getMinBalancePct();
+  if(pkg.balancePct < minPct) return false;
+  const dir = getSellingDirection();
+  if(dir === 'any') return true;
+  // Direction check only meaningful when we know which side is which.
+  // Multi-team or no-selected-player scenarios pass on balance alone.
+  if(pkg.losingSide === 'unknown') return true;
+  if(dir === 'cantlose'){
+    // Selling team must not give more than they get. They can be neutral
+    // ('balanced') or winning ('to' is the losing side). Exclude FROM-losing.
+    return pkg.losingSide !== 'from';
+  }
+  if(dir === 'cantwin'){
+    // Selling team must not get more than they give. Neutral or FROM-losing
+    // is OK; exclude packages where TO is the losing side.
+    return pkg.losingSide !== 'to';
+  }
+  return true;
 }
 
 // Auto-selection targets the final video to a sensible package count.
@@ -888,11 +918,9 @@ async function generate(){
         if(res.balancePct === null) continue; // can't rank a single-sided result; skip
         if(!byKey.has(res.key)){
           // Detect which side gives up more value (the "losing" side). Used
-          // by the asymmetric filter (FROM-min % vs TO-min %) so the user
-          // can let one side eat a loss while the other can't.
+          // by the directional filter (selling team can't lose / can't win)
+          // so the user can constrain the trade by who comes out ahead.
           const losingSide = detectLosingSide(res);
-          const fromThresh = getFromMinPct();
-          const toThresh = getToMinPct();
           const pkg = {
             tradeTeams: res.tradeTeams,
             verdict: res.verdict,
@@ -906,7 +934,7 @@ async function generate(){
             destTeam: dest ? (selectedToTeams.find(t=>slugify(t)===dest) || dest) : null,
             selected: false
           };
-          pkg.selected = pkgPassesFilter(pkg, fromThresh, toThresh);
+          pkg.selected = pkgPassesFilter(pkg);
           byKey.set(res.key, pkg);
         }
       }else{
@@ -943,29 +971,24 @@ async function generate(){
 
 // Pick the default selection set for the video, targeting TARGET_MIN..TARGET_MAX
 // packages. Returns a human-readable status fragment describing what was done.
-// Assumes `collected` is already sorted by balancePct descending. Uses the
-// asymmetric (FROM% / TO%) filter — packages whose losing side clears its
-// own threshold count as "above the line".
+// Assumes `collected` is already sorted by balancePct descending. Uses
+// pkgPassesFilter (min balance + directional constraint).
 function autoSelect(){
-  const fromThresh = getFromMinPct();
-  const toThresh = getToMinPct();
-  const aboveLine = collected.filter(p => pkgPassesFilter(p, fromThresh, toThresh));
-  const lineDesc = (fromThresh===toThresh)
-    ? (fromThresh+'%')
-    : ('FROM '+fromThresh+'% / TO '+toThresh+'%');
+  const minPct = getMinBalancePct();
+  const dir = getSellingDirection();
+  const aboveLine = collected.filter(p => pkgPassesFilter(p));
+  const dirSuffix = dir==='cantlose' ? ' + selling team can\'t lose'
+                   : dir==='cantwin' ? ' + selling team can\'t win'
+                   : '';
+  const lineDesc = minPct + '%' + dirSuffix;
   let keepKeys, note;
   if(aboveLine.length >= TARGET_MAX){
-    // Plenty above the quality line — keep the top TARGET_MAX so the video
-    // doesn't get bloated. The dropped ones can still be rescued manually.
     keepKeys = new Set(aboveLine.slice(0, TARGET_MAX).map(p => p.key));
     note = 'Auto-selected top '+TARGET_MAX+' by balance ('+aboveLine.length+' qualified).';
   } else if(aboveLine.length >= TARGET_MIN){
-    // Within the sweet spot — keep everything above the line.
     keepKeys = new Set(aboveLine.map(p => p.key));
     note = 'Auto-selected '+aboveLine.length+' packages above the '+lineDesc+' quality line.';
   } else {
-    // Too few above the line — fill from below by balance order until we
-    // reach TARGET_MIN. If `collected.length < TARGET_MIN`, take all.
     const target = Math.min(TARGET_MIN, collected.length);
     keepKeys = new Set(collected.slice(0, target).map(p => p.key));
     const fillCount = target - aboveLine.length;
@@ -1018,13 +1041,14 @@ function renderReview(){
   $('out').style.display = 'none';
 
   const anyPicks = collected.some(p=>p.hasPicks);
-  const _fromT = getFromMinPct(), _toT = getToMinPct();
-  const _lineDesc = (_fromT===_toT)
-    ? (_fromT+'%')
-    : ('FROM '+_fromT+'% / TO '+_toT+'%');
+  const _minPct = getMinBalancePct();
+  const _dir = getSellingDirection();
+  const _dirSuffix = _dir==='cantlose' ? ', selling team can\'t lose'
+                    : _dir==='cantwin' ? ', selling team can\'t win'
+                    : '';
   $('filterLine').textContent =
-    `Filter line ${_lineDesc}. `
-    + `Packages whose losing side clears its threshold are pre-checked; others listed dimmed — check to rescue.`;
+    `Filter: min balance ${_minPct}%${_dirSuffix}. `
+    + `Packages clearing both conditions are pre-checked; others listed dimmed — check to rescue.`;
 
   // ---- per-batch provenance: which players have no trade-value sheet entry ----
   const distinct = new Map();   // player -> source ('sheet' wins if seen anywhere)
@@ -1046,22 +1070,26 @@ function renderReview(){
 
   const list = $('reviewList');
   list.innerHTML = collected.map((pkg,i)=>{
-    const passes = pkgPassesFilter(pkg, _fromT, _toT);
+    const passes = pkgPassesFilter(pkg);
     const low = !passes;
     const badgeCls = (low ? 'low' : 'good') + (pkg.anyFallback ? ' approx' : '');
     const picksTag = pkg.hasPicks ? '<span class="tag picks">picks</span>' : '';
-    // Sidedness annotation — tells the user which side is losing value in
-    // this package, so the asymmetric threshold meaning is unambiguous.
+    // Sidedness chip — shows which side gives more value in this package.
+    // 'Selling loses' = FROM is losing value (selling team gives more than
+    // gets back). 'Selling wins' = TO is losing value. 'Even' = balanced.
     let sideTag = '';
-    if(pkg.losingSide==='from')sideTag='<span class="tag" style="background:#fff7e6;color:#b45309;border:1px solid rgba(245,158,11,.4)">FROM loses</span>';
-    else if(pkg.losingSide==='to')sideTag='<span class="tag" style="background:#fff7e6;color:#b45309;border:1px solid rgba(245,158,11,.4)">TO loses</span>';
+    if(pkg.losingSide==='from')sideTag='<span class="tag" style="background:#fee2e2;color:#991b1b;border:1px solid rgba(220,38,38,.35)">Selling loses</span>';
+    else if(pkg.losingSide==='to')sideTag='<span class="tag" style="background:#dcfce7;color:#166534;border:1px solid rgba(34,197,94,.35)">Selling wins</span>';
+    else if(pkg.losingSide==='balanced')sideTag='<span class="tag" style="background:#e0e7ff;color:#3730a3;border:1px solid rgba(99,102,241,.35)">Even</span>';
     const approx = pkg.anyFallback ? `<div class="approxnote">approx — balance built on salary fallback for ${(pkg.provenance||[]).filter(r=>r.source==='salary').length} player(s); missing trade values</div>` : '';
-    // Below-line label reflects which threshold the package missed.
+    // Below-line label: state which gate the package failed.
     let below = '';
     if(low){
-      const thresh = pkg.losingSide==='from'?_fromT:pkg.losingSide==='to'?_toT:Math.min(_fromT,_toT);
-      const sideLabel = pkg.losingSide==='from'?'FROM-side ':pkg.losingSide==='to'?'TO-side ':'';
-      below = `<div class="belowline">${pkg.balancePct}% — below the ${sideLabel}${thresh}% filter line (check to rescue)</div>`;
+      const reasons = [];
+      if(pkg.balancePct < _minPct) reasons.push(`${pkg.balancePct}% < ${_minPct}% min balance`);
+      if(_dir==='cantlose' && pkg.losingSide==='from') reasons.push(`selling team loses value`);
+      if(_dir==='cantwin' && pkg.losingSide==='to') reasons.push(`selling team wins value`);
+      below = `<div class="belowline">${reasons.join('; ')} (check to rescue)</div>`;
     }
     const note = (pkg.verdict && pkg.verdict.message && pkg.verdict.type !== 'valid')
       ? `<div class="notemsg">Engine note: ${escapeHtml(pkg.verdict.message)}</div>` : '';
@@ -1083,7 +1111,7 @@ function renderReview(){
   list.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
     const i = parseInt(cb.dataset.i);
     collected[i].selected = cb.checked;
-    const passes = pkgPassesFilter(collected[i], getFromMinPct(), getToMinPct());
+    const passes = pkgPassesFilter(collected[i]);
     cb.closest('.pkg').classList.toggle('dim', !cb.checked && !passes);
     updateSelCount();
   }));
@@ -1628,7 +1656,7 @@ function drawSingleFrame(elapsed){
     c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?34:42);
     c.fillText('WOULD YOU DO THIS TRADE?', layout.W/2, layout.aspect==='1:1'?112:layout.titleY); // clear the top balance badge on square
     drawTeamsStage(c,layout,sides,teamStarts,elapsed,win.meter.s,win.meter.e);
-    if(elapsed>=lastEnd-0.2) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(lastEnd-0.2))/0.4), pkgPassesFilter(pkg,getFromMinPct(),getToMinPct()));
+    if(elapsed>=lastEnd-0.2) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(lastEnd-0.2))/0.4), pkgPassesFilter(pkg));
     c.globalAlpha=1;
   }
   if(elapsed<win.hook.e){
@@ -1703,7 +1731,7 @@ function drawSegment(c,layout,seg,t,optionNumber){
     c.fillText('OPTION ' + optionNumber, 40, layout.titleY);
     const teamStarts = win.teams.map(w=>w.s);
     drawTeamsStage(c,layout,sides,teamStarts,t,win.meter.s,win.meter.e);
-    if(t>=win.meter.s) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((t-win.meter.s)/0.4), pkgPassesFilter(pkg,getFromMinPct(),getToMinPct()));
+    if(t>=win.meter.s) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((t-win.meter.s)/0.4), pkgPassesFilter(pkg));
     if(t>=win.stamp.s) drawLegalStamp(c,layout,pkg.verdict, t-win.stamp.s);
     c.restore();
   }
@@ -1934,7 +1962,7 @@ function onThresholdChange(){
   renderReview();
   updateSelCount();
 }
-['fromMinPct','toMinPct'].forEach(id=>{
+['minBalancePct','sellingDirection'].forEach(id=>{
   const el=$(id);
   if(el){el.addEventListener('change',onThresholdChange);el.addEventListener('input',onThresholdChange)}
 });
