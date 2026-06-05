@@ -93,6 +93,10 @@
   .secondary-row{display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
   .checkbox-toggle{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer;margin:0;color:var(--text)}
   .checkbox-toggle input{accent-color:var(--accent);cursor:pointer;width:16px;height:16px}
+  .balance-input{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text);cursor:help;margin:0}
+  .balance-input>span{color:var(--muted);font-weight:500;white-space:nowrap}
+  .balance-input input{width:54px;padding:5px 7px;border:1px solid var(--border);border-radius:5px;font:600 13px/1 system-ui,sans-serif;background:#fff;color:var(--text);text-align:center}
+  .balance-input input:focus{outline:none;border-color:var(--accent)}
   .secondary-row .banner{margin-top:0;margin-left:auto;max-width:60%}
   .secondary-row #status{margin-top:0}
   /* responsive: stack inputs on narrow screens */
@@ -208,6 +212,14 @@
         <input type="checkbox" id="tryPicks">
         <span>Try to include draft picks <span style="color:var(--muted);font-size:11px">(reverts if illegal)</span></span>
       </label>
+      <label class="balance-input" title="Minimum balance % the FROM team (giving up the star) must clear. Lower = FROM willing to lose more value.">
+        <span>FROM min %</span>
+        <input type="number" id="fromMinPct" min="50" max="100" value="85" step="1">
+      </label>
+      <label class="balance-input" title="Minimum balance % the TO team (receiving) must clear. Higher = TO can't lose value.">
+        <span>TO min %</span>
+        <input type="number" id="toMinPct" min="50" max="100" value="85" step="1">
+      </label>
       <div id="status">Loading live salary data for pickers…</div>
       <div id="banner" class="banner"></div>
     </div>
@@ -309,9 +321,58 @@ const TM_LIVE_ORIGIN = 'https://nba-trade-calculator.thejorgesierra.workers.dev'
 // The review filter "recommends" (pre-checks) trades whose balance is within
 // this tolerance of perfect. 0.15 => recommend balance >= 85%. The user can
 // always rescue a dimmed sub-line trade; the filter only recommends.
+// Per-side overrides come from the UI (fromMinPct / toMinPct inputs); these
+// constants are the defaults seeded into those inputs at page load.
 const TRADE_QUALITY_TOLERANCE = 0.15;
 const QUALITY_LINE_PCT = Math.round((1 - TRADE_QUALITY_TOLERANCE) * 100); // 85
 const ATTEMPTS_PER_DEST = 24;   // cap per destination team (or total if none chosen)
+
+// Read the per-side thresholds from the UI. Defaults 85/85 = current
+// symmetric behavior; bump TO to 100 for "opponent can't lose value"
+// scenarios (e.g. the FROM team gives up a star and absorbs the value loss).
+function getFromMinPct(){
+  const v = parseInt(($('fromMinPct')||{}).value, 10);
+  return Number.isFinite(v) ? Math.max(50, Math.min(100, v)) : QUALITY_LINE_PCT;
+}
+function getToMinPct(){
+  const v = parseInt(($('toMinPct')||{}).value, 10);
+  return Number.isFinite(v) ? Math.max(50, Math.min(100, v)) : QUALITY_LINE_PCT;
+}
+
+// Identify which side gives up more value (the "losing" side). For 2-team
+// trades this is unambiguous; the FROM team is whichever holds one of the
+// user's selectedPlayers in playersOut. For 3+ team trades or scenarios
+// without selectedPlayers, return 'unknown' and let the caller fall back
+// to the symmetric (min-of-thresholds) check.
+function detectLosingSide(res){
+  if(!res||!res.teamValuesOut||res.teamValuesOut.length<2)return 'unknown';
+  if(res.teamValuesOut.length!==2)return 'unknown';
+  if(!selectedPlayers||!selectedPlayers.length)return 'unknown';
+  const selNames=new Set(selectedPlayers.map(p=>String(p.player||'').trim().toLowerCase()));
+  let fromIdx=-1;
+  for(let i=0;i<res.tradeTeams.length;i++){
+    const out=(res.tradeTeams[i].playersOut||[]).map(p=>String(p.player||'').trim().toLowerCase());
+    if(out.some(n=>selNames.has(n))){fromIdx=i;break}
+  }
+  if(fromIdx<0)return 'unknown';
+  const fromV=res.teamValuesOut[fromIdx].valueOut;
+  const toV=res.teamValuesOut[1-fromIdx].valueOut;
+  if(fromV<=0||toV<=0)return 'unknown';
+  // The team with more valueOut is the one "losing" — they're giving more
+  // than they're getting back. balancePct equals that side's retention.
+  if(fromV>toV)return 'from';
+  if(toV>fromV)return 'to';
+  return 'from'; // exact tie — treat as FROM's call
+}
+
+// Whether a package passes the auto-select filter under the current
+// asymmetric thresholds. The losing side's balance must clear its own
+// threshold; unknown losing side falls back to the weaker threshold.
+function pkgPassesFilter(pkg,fromThresh,toThresh){
+  if(pkg.losingSide==='from')return pkg.balancePct>=fromThresh;
+  if(pkg.losingSide==='to')return pkg.balancePct>=toThresh;
+  return pkg.balancePct>=Math.min(fromThresh,toThresh);
+}
 
 // Auto-selection targets the final video to a sensible package count.
 // >= TARGET_MAX above the quality line -> keep the top TARGET_MAX by balance
@@ -674,11 +735,21 @@ window.__TVG_BRIDGE__ = (function(){
         var prov = provenanceOf(clean);
         var anyFallback = prov.some(function(r){ return r.source==='salary'; });
 
+        // Per-team value-out totals — used by the outer code to detect which
+        // side gives up more value (the "losing" side). Asymmetric thresholds
+        // (FROM-min % vs TO-min %) get applied against this in the filter.
+        var teamValuesOut = clean.map(function(t){
+          var s = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
+          s += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
+          return { teamName: t.teamName, valueOut: s };
+        });
+
         return {
           ok:true,
           key: key,
           hasPicks: hasPicks,
           balancePct: balancePct(clean),
+          teamValuesOut: teamValuesOut,
           provenance: prov,
           anyFallback: anyFallback,
           tradeTeams: clean,
@@ -816,17 +887,27 @@ async function generate(){
         misses = 0;
         if(res.balancePct === null) continue; // can't rank a single-sided result; skip
         if(!byKey.has(res.key)){
-          byKey.set(res.key, {
+          // Detect which side gives up more value (the "losing" side). Used
+          // by the asymmetric filter (FROM-min % vs TO-min %) so the user
+          // can let one side eat a loss while the other can't.
+          const losingSide = detectLosingSide(res);
+          const fromThresh = getFromMinPct();
+          const toThresh = getToMinPct();
+          const pkg = {
             tradeTeams: res.tradeTeams,
             verdict: res.verdict,
             balancePct: res.balancePct,
+            teamValuesOut: res.teamValuesOut || [],
+            losingSide: losingSide,
             hasPicks: res.hasPicks,
             provenance: res.provenance || [],
             anyFallback: !!res.anyFallback,
             key: res.key,
             destTeam: dest ? (selectedToTeams.find(t=>slugify(t)===dest) || dest) : null,
-            selected: res.balancePct >= QUALITY_LINE_PCT   // filter recommends
-          });
+            selected: false
+          };
+          pkg.selected = pkgPassesFilter(pkg, fromThresh, toThresh);
+          byKey.set(res.key, pkg);
         }
       }else{
         if(res && res.error === 'illegal') illegalSeen++;
@@ -862,9 +943,16 @@ async function generate(){
 
 // Pick the default selection set for the video, targeting TARGET_MIN..TARGET_MAX
 // packages. Returns a human-readable status fragment describing what was done.
-// Assumes `collected` is already sorted by balancePct descending.
+// Assumes `collected` is already sorted by balancePct descending. Uses the
+// asymmetric (FROM% / TO%) filter — packages whose losing side clears its
+// own threshold count as "above the line".
 function autoSelect(){
-  const aboveLine = collected.filter(p => p.balancePct >= QUALITY_LINE_PCT);
+  const fromThresh = getFromMinPct();
+  const toThresh = getToMinPct();
+  const aboveLine = collected.filter(p => pkgPassesFilter(p, fromThresh, toThresh));
+  const lineDesc = (fromThresh===toThresh)
+    ? (fromThresh+'%')
+    : ('FROM '+fromThresh+'% / TO '+toThresh+'%');
   let keepKeys, note;
   if(aboveLine.length >= TARGET_MAX){
     // Plenty above the quality line — keep the top TARGET_MAX so the video
@@ -874,7 +962,7 @@ function autoSelect(){
   } else if(aboveLine.length >= TARGET_MIN){
     // Within the sweet spot — keep everything above the line.
     keepKeys = new Set(aboveLine.map(p => p.key));
-    note = 'Auto-selected '+aboveLine.length+' packages above the '+QUALITY_LINE_PCT+'% quality line.';
+    note = 'Auto-selected '+aboveLine.length+' packages above the '+lineDesc+' quality line.';
   } else {
     // Too few above the line — fill from below by balance order until we
     // reach TARGET_MIN. If `collected.length < TARGET_MIN`, take all.
@@ -883,7 +971,7 @@ function autoSelect(){
     const fillCount = target - aboveLine.length;
     note = aboveLine.length > 0
       ? 'Auto-selected '+aboveLine.length+' above the line + '+fillCount+' top packages below it to reach the '+TARGET_MIN+'-package minimum.'
-      : 'Auto-selected top '+target+' packages (none reached the '+QUALITY_LINE_PCT+'% quality line).';
+      : 'Auto-selected top '+target+' packages (none reached the '+lineDesc+' quality line).';
   }
   collected.forEach(p => { p.selected = keepKeys.has(p.key); });
   return note;
@@ -930,9 +1018,13 @@ function renderReview(){
   $('out').style.display = 'none';
 
   const anyPicks = collected.some(p=>p.hasPicks);
+  const _fromT = getFromMinPct(), _toT = getToMinPct();
+  const _lineDesc = (_fromT===_toT)
+    ? (_fromT+'%')
+    : ('FROM '+_fromT+'% / TO '+_toT+'%');
   $('filterLine').textContent =
-    `Filter line ${QUALITY_LINE_PCT}% (TRADE_QUALITY_TOLERANCE ${TRADE_QUALITY_TOLERANCE}). `
-    + `Packages at or above are pre-checked; below are listed dimmed — check to rescue.`;
+    `Filter line ${_lineDesc}. `
+    + `Packages whose losing side clears its threshold are pre-checked; others listed dimmed — check to rescue.`;
 
   // ---- per-batch provenance: which players have no trade-value sheet entry ----
   const distinct = new Map();   // player -> source ('sheet' wins if seen anywhere)
@@ -954,11 +1046,23 @@ function renderReview(){
 
   const list = $('reviewList');
   list.innerHTML = collected.map((pkg,i)=>{
-    const low = pkg.balancePct < QUALITY_LINE_PCT;
+    const passes = pkgPassesFilter(pkg, _fromT, _toT);
+    const low = !passes;
     const badgeCls = (low ? 'low' : 'good') + (pkg.anyFallback ? ' approx' : '');
     const picksTag = pkg.hasPicks ? '<span class="tag picks">picks</span>' : '';
+    // Sidedness annotation — tells the user which side is losing value in
+    // this package, so the asymmetric threshold meaning is unambiguous.
+    let sideTag = '';
+    if(pkg.losingSide==='from')sideTag='<span class="tag" style="background:#fff7e6;color:#b45309;border:1px solid rgba(245,158,11,.4)">FROM loses</span>';
+    else if(pkg.losingSide==='to')sideTag='<span class="tag" style="background:#fff7e6;color:#b45309;border:1px solid rgba(245,158,11,.4)">TO loses</span>';
     const approx = pkg.anyFallback ? `<div class="approxnote">approx — balance built on salary fallback for ${(pkg.provenance||[]).filter(r=>r.source==='salary').length} player(s); missing trade values</div>` : '';
-    const below = low ? `<div class="belowline">${pkg.balancePct}% — below the ${QUALITY_LINE_PCT}% filter line (check to rescue)</div>` : '';
+    // Below-line label reflects which threshold the package missed.
+    let below = '';
+    if(low){
+      const thresh = pkg.losingSide==='from'?_fromT:pkg.losingSide==='to'?_toT:Math.min(_fromT,_toT);
+      const sideLabel = pkg.losingSide==='from'?'FROM-side ':pkg.losingSide==='to'?'TO-side ':'';
+      below = `<div class="belowline">${pkg.balancePct}% — below the ${sideLabel}${thresh}% filter line (check to rescue)</div>`;
+    }
     const note = (pkg.verdict && pkg.verdict.message && pkg.verdict.type !== 'valid')
       ? `<div class="notemsg">Engine note: ${escapeHtml(pkg.verdict.message)}</div>` : '';
     return `<div class="pkg ${low?'dim':''}" data-i="${i}">
@@ -966,7 +1070,7 @@ function renderReview(){
       <div class="body">
         <div class="topline">
           <span class="badge ${badgeCls}">${pkg.balancePct}%</span>
-          ${verdictTag(pkg.verdict)} ${picksTag}
+          ${verdictTag(pkg.verdict)} ${picksTag} ${sideTag}
           ${pkg.destTeam?`<span class="sends" style="font-size:11px">→ ${escapeHtml(pkg.destTeam)}</span>`:''}
         </div>
         <div class="summary">${packageSummaryHtml(pkg)}</div>
@@ -979,7 +1083,8 @@ function renderReview(){
   list.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
     const i = parseInt(cb.dataset.i);
     collected[i].selected = cb.checked;
-    cb.closest('.pkg').classList.toggle('dim', !cb.checked && collected[i].balancePct < QUALITY_LINE_PCT);
+    const passes = pkgPassesFilter(collected[i], getFromMinPct(), getToMinPct());
+    cb.closest('.pkg').classList.toggle('dim', !cb.checked && !passes);
     updateSelCount();
   }));
 
@@ -1369,9 +1474,13 @@ function drawMeter(c,m,sides,aStart,bStart,t,settleStart,settleEnd,layout){
   c.textAlign='right'; c.fillText(formatSalary(Math.round(b)), m.x+m.w, barY+barH+m.h*0.22);
 }
 
-function drawBalanceBadge(c,layout,pct,alpha){
+function drawBalanceBadge(c,layout,pct,alpha,goodOverride){
   if(pct==null) return;
-  const good = pct >= QUALITY_LINE_PCT;
+  // Color is green if the package cleared its filter (asymmetric pass when
+  // available, falls back to the legacy 85% line otherwise). The caller
+  // passes the explicit pass/fail so per-package thresholds are respected
+  // in the rendered video.
+  const good = (goodOverride!=null) ? !!goodOverride : (pct >= QUALITY_LINE_PCT);
   const col = good ? '#22c55e' : '#f59e0b';
   const txt = pct + '%';
   const valSize = layout.aspect==='1:1' ? 34 : 46;
@@ -1519,7 +1628,7 @@ function drawSingleFrame(elapsed){
     c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?34:42);
     c.fillText('WOULD YOU DO THIS TRADE?', layout.W/2, layout.aspect==='1:1'?112:layout.titleY); // clear the top balance badge on square
     drawTeamsStage(c,layout,sides,teamStarts,elapsed,win.meter.s,win.meter.e);
-    if(elapsed>=lastEnd-0.2) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(lastEnd-0.2))/0.4));
+    if(elapsed>=lastEnd-0.2) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(lastEnd-0.2))/0.4), pkgPassesFilter(pkg,getFromMinPct(),getToMinPct()));
     c.globalAlpha=1;
   }
   if(elapsed<win.hook.e){
@@ -1594,7 +1703,7 @@ function drawSegment(c,layout,seg,t,optionNumber){
     c.fillText('OPTION ' + optionNumber, 40, layout.titleY);
     const teamStarts = win.teams.map(w=>w.s);
     drawTeamsStage(c,layout,sides,teamStarts,t,win.meter.s,win.meter.e);
-    if(t>=win.meter.s) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((t-win.meter.s)/0.4));
+    if(t>=win.meter.s) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((t-win.meter.s)/0.4), pkgPassesFilter(pkg,getFromMinPct(),getToMinPct()));
     if(t>=win.stamp.s) drawLegalStamp(c,layout,pkg.verdict, t-win.stamp.s);
     c.restore();
   }
@@ -1815,6 +1924,21 @@ wirePlayerSearch('playerSearch', 'playerResults', selectedPlayers, 'playerChips'
 wirePlayerSearch('excludeSearch', 'excludeResults', excludedPlayers, 'excludeChips');
 wireTeamSearch('toSearch', 'toResults', selectedToTeams, 'toChips');
 $('genBtn').addEventListener('click', generate);
+
+// Re-evaluate auto-selection live whenever the user changes the threshold
+// inputs. We only re-run if packages are already collected — otherwise the
+// new values just feed into the next generate() pass.
+function onThresholdChange(){
+  if(!collected||!collected.length)return;
+  autoSelect();
+  renderReview();
+  updateSelCount();
+}
+['fromMinPct','toMinPct'].forEach(id=>{
+  const el=$(id);
+  if(el){el.addEventListener('change',onThresholdChange);el.addEventListener('input',onThresholdChange)}
+});
+
 document.addEventListener('click', (e)=>{
   if(!e.target.closest('#playerSearch') && !e.target.closest('#playerResults')) $('playerResults').style.display='none';
   if(!e.target.closest('#excludeSearch') && !e.target.closest('#excludeResults')) $('excludeResults').style.display='none';
