@@ -250,6 +250,16 @@ const TRADE_QUALITY_TOLERANCE = 0.15;
 const QUALITY_LINE_PCT = Math.round((1 - TRADE_QUALITY_TOLERANCE) * 100); // 85
 const ATTEMPTS_PER_DEST = 24;   // cap per destination team (or total if none chosen)
 
+// Auto-selection targets the final video to a sensible package count.
+// >= TARGET_MAX above the quality line -> keep the top TARGET_MAX by balance
+//   (drops the marginal "good but not great" ones so the video stays tight).
+// Between TARGET_MIN and TARGET_MAX above the line -> keep all of them.
+// < TARGET_MIN above the line -> fill from below the line by balance order
+//   until we hit TARGET_MIN (some sub-line packages get auto-included to
+//   guarantee a watchable-length video). The user can still veto manually.
+const TARGET_MIN = 5;
+const TARGET_MAX = 15;
+
 /* ------------------------------- state ----------------------------------- */
 let pickerPlayers = [];   // [{player, team, salary, headshot, teamLogo}]
 let pickerTeams = [];
@@ -733,11 +743,45 @@ async function generate(){
     return;
   }
 
+  // Auto-select TARGET_MIN..TARGET_MAX packages by balance %. Overrides the
+  // collection-time `selected` flag (which was set per-package by the >=85%
+  // line). Manual veto remains available in the review stage.
+  const autoMsg = autoSelect();
+
   setStatus('Collected '+collected.length+' legal package(s) from '+attempts+' engine attempts'
-    + (illegalSeen?('; '+illegalSeen+' illegal discarded'):'')+'.');
+    + (illegalSeen?('; '+illegalSeen+' illegal discarded'):'')+'. '+autoMsg);
   showBanner('ok', 'All packages produced by the real Trade Machine. Legality is absolute — illegal trades were discarded.');
   renderReview();
   $('genBtn').disabled = false;
+}
+
+// Pick the default selection set for the video, targeting TARGET_MIN..TARGET_MAX
+// packages. Returns a human-readable status fragment describing what was done.
+// Assumes `collected` is already sorted by balancePct descending.
+function autoSelect(){
+  const aboveLine = collected.filter(p => p.balancePct >= QUALITY_LINE_PCT);
+  let keepKeys, note;
+  if(aboveLine.length >= TARGET_MAX){
+    // Plenty above the quality line — keep the top TARGET_MAX so the video
+    // doesn't get bloated. The dropped ones can still be rescued manually.
+    keepKeys = new Set(aboveLine.slice(0, TARGET_MAX).map(p => p.key));
+    note = 'Auto-selected top '+TARGET_MAX+' by balance ('+aboveLine.length+' qualified).';
+  } else if(aboveLine.length >= TARGET_MIN){
+    // Within the sweet spot — keep everything above the line.
+    keepKeys = new Set(aboveLine.map(p => p.key));
+    note = 'Auto-selected '+aboveLine.length+' packages above the '+QUALITY_LINE_PCT+'% quality line.';
+  } else {
+    // Too few above the line — fill from below by balance order until we
+    // reach TARGET_MIN. If `collected.length < TARGET_MIN`, take all.
+    const target = Math.min(TARGET_MIN, collected.length);
+    keepKeys = new Set(collected.slice(0, target).map(p => p.key));
+    const fillCount = target - aboveLine.length;
+    note = aboveLine.length > 0
+      ? 'Auto-selected '+aboveLine.length+' above the line + '+fillCount+' top packages below it to reach the '+TARGET_MIN+'-package minimum.'
+      : 'Auto-selected top '+target+' packages (none reached the '+QUALITY_LINE_PCT+'% quality line).';
+  }
+  collected.forEach(p => { p.selected = keepKeys.has(p.key); });
+  return note;
 }
 
 /* =====================================================================
