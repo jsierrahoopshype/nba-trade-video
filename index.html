@@ -222,6 +222,16 @@
 
     <!-- REVIEW STAGE -->
     <div id="reviewWrap" style="display:none">
+      <!-- Video card (canvas + recorded output) sits FIRST so it's the
+           "second block" of the page right after the toolbar. The user
+           sees a static preview update as they tick/untick packages,
+           and the recorded video appears in the same card after Render. -->
+      <div class="card" id="videoCard" style="display:none">
+        <h2>Video</h2>
+        <canvas id="stageCanvas" width="1080" height="1920"></canvas>
+        <video id="out" controls></video>
+      </div>
+
       <div class="card">
         <h2>Review packages</h2>
         <div class="reviewbar">
@@ -257,12 +267,6 @@
         <div id="renderStatus"></div>
         <div id="reviewList"></div>
         <div class="hint" id="picksHint" style="margin-top:10px"></div>
-      </div>
-
-      <div class="card" id="videoCard" style="display:none">
-        <h2>Video</h2>
-        <canvas id="stageCanvas" width="1080" height="1920"></canvas>
-        <video id="out" controls></video>
       </div>
 
       <div class="card">
@@ -875,7 +879,10 @@ function provBreakdownHtml(pkg){
 function renderReview(){
   $('empty').style.display = 'none';
   $('reviewWrap').style.display = 'block';
-  $('videoCard').style.display = 'none';
+  // Show the video card immediately so the user sees a static preview as
+  // the "second block" right after the parameter toolbar. The recorded
+  // <video> stays hidden until they hit Render and a recording finishes.
+  $('videoCard').style.display = 'block';
   $('out').style.display = 'none';
 
   const anyPicks = collected.some(p=>p.hasPicks);
