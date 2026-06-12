@@ -218,6 +218,10 @@
         <span>Min balance</span>
         <input type="number" id="minBalancePct" min="50" max="100" value="85" step="5"><span style="margin-left:-3px;color:var(--muted)">%</span>
       </label>
+      <label class="balance-input" id="maxAgeWrap" title="Ignore any player older than this — they won't be selectable and the engine won't use them as filler in auto-built packages. Leave blank for no age limit.">
+        <span>Max age</span>
+        <input type="number" id="maxAge" min="18" max="50" placeholder="—" step="1" style="width:58px"><span id="maxAgeNote" style="margin-left:4px;color:var(--muted);font-size:11px"></span>
+      </label>
       <label class="balance-input" title="Selling team = the team giving up your selected player(s). 'Can't lose' means they must come out value-neutral or better. 'Can't win' means they must come out value-neutral or worse.">
         <span>Selling team</span>
         <select id="sellingDirection">
@@ -415,7 +419,38 @@ const TARGET_MIN = 5;
 const TARGET_MAX = 15;
 
 /* ------------------------------- state ----------------------------------- */
-let pickerPlayers = [];   // [{player, team, salary, headshot, teamLogo}]
+let pickerPlayers = [];   // [{player, team, salary, headshot, teamLogo, age}]
+let playerAges = {};      // normalizedName -> age (years), from Sheet2 birth dates
+// Sheet2 of the main HoopsMatic spreadsheet, gid 1889032294: block columns
+// PLAYER (18), BIRTH DATE (19). Age is computed from the birth date so it's
+// always current and never trusts a stale precomputed column.
+const AGES_CSV_URL = "https://docs.google.com/spreadsheets/d/11llk0icQqoi0JwJXat5KO8y2RQeBMN5rS9FhAY56Idc/export?format=csv&gid=1889032294";
+function normName(n){ return (n||"").toLowerCase().normalize("NFKD").replace(/[^a-z ]/g,"").replace(/\s+/g," ").trim(); }
+function ageFromBirthDate(s){
+  s=(s||"").trim(); if(!s) return null;
+  const m=s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/); if(!m) return null;
+  const mo=+m[1], da=+m[2], yr=+m[3];
+  const today=new Date();
+  let a=today.getFullYear()-yr - ((today.getMonth()+1<mo || (today.getMonth()+1===mo && today.getDate()<da))?1:0);
+  return (a>15 && a<55) ? a : null;
+}
+async function loadPlayerAges(){
+  try{
+    const res=await fetch(AGES_CSV_URL,{cache:"no-store"});
+    if(!res.ok) throw new Error("HTTP "+res.status);
+    const csv=await res.text();
+    const rows=Papa.parse(csv,{skipEmptyLines:true}).data;   // no header: multi-block sheet
+    let n=0;
+    rows.forEach(r=>{
+      if(!r||r.length<20) return;
+      const name=(r[18]||"").trim();
+      if(!name||name==="PLAYER") return;
+      const age=ageFromBirthDate(r[19]);
+      if(age!=null){ playerAges[normName(name)]=age; n++; }
+    });
+    return n;
+  }catch(e){ console.warn("age data unavailable:",e); return 0; }
+}
 let pickerTeams = [];
 const selectedPlayers = [];   // scenario: players to move (objects)
 const excludedPlayers = [];   // scenario: players to exclude (objects)
@@ -463,8 +498,29 @@ async function loadPickerData(){
     }));
   pickerTeams = Array.from(new Set(pickerPlayers.map(p => p.team))).sort();
   fillTeamSelects();
-  setStatus('Loaded ' + pickerPlayers.length + ' players / ' + pickerTeams.length + ' teams for pickers.');
+  const aged = await loadPlayerAges();
+  pickerPlayers.forEach(p => { p.age = playerAges[normName(p.player)] ?? null; });
+  const note = $('maxAgeNote'), wrap = $('maxAgeWrap');
+  if(aged > 0){
+    const matched = pickerPlayers.filter(p => p.age != null).length;
+    if(note) note.textContent = matched + ' aged';
+  } else {
+    // No age data -> disable the control instead of letting it silently no-op
+    const inp = $('maxAge');
+    if(inp){ inp.disabled = true; inp.placeholder = 'n/a'; }
+    if(note) note.textContent = 'age data unavailable';
+    if(wrap) wrap.style.opacity = '.5';
+  }
+  setStatus('Loaded ' + pickerPlayers.length + ' players / ' + pickerTeams.length + ' teams' + (aged ? ' · ' + aged + ' ages' : '') + '.');
   $('genBtn').disabled = false;
+}
+
+// Players excluded purely because they exceed the Max-age cap. Combined with
+// the user's manual exclusions when the scenario is built.
+function ageExcludedSlugs(){
+  const cap = parseInt(($('maxAge')||{}).value, 10);
+  if(!cap || isNaN(cap)) return [];
+  return pickerPlayers.filter(p => p.age != null && p.age > cap).map(p => slugify(p.player));
 }
 
 function fillTeamSelects(){
@@ -479,8 +535,10 @@ function wirePlayerSearch(inputId, resultsId, list, chipsId, onChange){
   function render(){
     const q = input.value.trim().toLowerCase();
     const chosen = new Set(list.map(p => p.player));
+    const cap = parseInt(($('maxAge')||{}).value, 10);
     const matches = pickerPlayers
       .filter(p => !chosen.has(p.player))
+      .filter(p => !(cap && !isNaN(cap) && p.age != null && p.age > cap))
       .filter(p => !q || p.player.toLowerCase().includes(q) || p.team.toLowerCase().includes(q))
       .sort((a,b) => b.salary - a.salary)
       .slice(0, 40);
@@ -488,7 +546,7 @@ function wirePlayerSearch(inputId, resultsId, list, chipsId, onChange){
     results.style.display='block';
     results.innerHTML = matches.map(p =>
       `<div class="row" data-p="${escapeHtml(p.player)}">
-         <span>${escapeHtml(p.player)} <span style="color:#5d6b82">${escapeHtml(p.team)}</span></span>
+         <span>${escapeHtml(p.player)} <span style="color:#5d6b82">${escapeHtml(p.team)}${p.age!=null?' · '+p.age:''}</span></span>
          <span class="sal">${formatSalary(p.salary)}</span></div>`).join('');
     results.querySelectorAll('.row').forEach(row => row.addEventListener('click', ()=>{
       const p = pickerPlayers.find(x => x.player === row.dataset.p);
@@ -583,9 +641,14 @@ function updateFromTeamLock(){
    2) Build the scenario -> loop params (one scenario per destination team)
    ===================================================================== */
 function baseScenario(){
+  // Age cap is enforced by adding over-age players to the SAME exclude list the
+  // engine already honors — so they never appear as auto-selected filler.
+  const exclude = Array.from(new Set(
+    excludedPlayers.map(p => slugify(p.player)).concat(ageExcludedSlugs())
+  ));
   return {
     players: selectedPlayers.map(p => slugify(p.player)),
-    exclude: excludedPlayers.map(p => slugify(p.player)),
+    exclude,
     from: $('fromTeam').value ? slugify($('fromTeam').value) : ''
   };
 }
@@ -1962,7 +2025,7 @@ function onThresholdChange(){
   renderReview();
   updateSelCount();
 }
-['minBalancePct','sellingDirection'].forEach(id=>{
+['minBalancePct','sellingDirection','maxAge'].forEach(id=>{
   const el=$(id);
   if(el){el.addEventListener('change',onThresholdChange);el.addEventListener('input',onThresholdChange)}
 });
