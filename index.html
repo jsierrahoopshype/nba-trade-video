@@ -831,17 +831,26 @@ window.__TVG_BRIDGE__ = (function(){
         // Per-team value-out totals — used by the outer code to detect which
         // side gives up more value (the "losing" side). Asymmetric thresholds
         // (FROM-min % vs TO-min %) get applied against this in the filter.
-        var teamValuesOut = clean.map(function(t){
-          var s = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
-          s += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
-          return { teamName: t.teamName, valueOut: s };
-        });
+        // Grade with the Trade Machine's OWN balance model so the video scores
+        // EXACTLY like the engine's realistic meter — filler discount on the
+        // secondary/role players + best-player premium for surrendering a star
+        // (+ roster penalty). This is what makes "two max players for a pile of
+        // sub-All-Stars" register as unbalanced instead of ~even on raw value.
+        // Falls back to plain min/max value if the engine fn is unavailable.
+        var bal = (typeof calculateTradeBalance==='function') ? calculateTradeBalance(clean) : null;
+        var teamValuesOut = (bal && bal.details && bal.details.length)
+          ? bal.details.map(function(d){ return { teamName:d.teamName, valueOut:d.out }; })
+          : clean.map(function(t){
+              var s = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
+              s += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
+              return { teamName: t.teamName, valueOut: s };
+            });
 
         return {
           ok:true,
           key: key,
           hasPicks: hasPicks,
-          balancePct: balancePct(clean),
+          balancePct: (bal && typeof bal.percentage==='number') ? bal.percentage : balancePct(clean),
           teamValuesOut: teamValuesOut,
           provenance: prov,
           anyFallback: anyFallback,
@@ -912,14 +921,23 @@ function loadTradeMachine(){
                  ? frame.contentWindow.__TVG_BRIDGE__.status() : null; }
       catch(e){ throw new Error('Cannot read the Trade Machine (cross-origin). Serve this tool from the same origin as the engine.'); }
       if(st && st.dataReady && st.hasGenerate){
-        // Best-effort: also wait briefly for the (async) trade-value sheet so balance
-        // provenance reflects real sheet values instead of premature salary fallbacks.
-        // The TV sheet is optional, so never fail if it doesn't arrive.
-        const tvDeadline = Date.now() + 4000;
+        // REQUIRED: wait for the (async) trade-value sheet before we let any
+        // grading happen. The Trade Machine derives balance from getTradeValue();
+        // until that sheet lands, tradeValueMapLower is empty, every player falls
+        // back to salary, and calculateTradeBalance() actually short-circuits to
+        // 100% ("perfectly balanced"). Grading then would NOT match the Trade
+        // Machine. Wait up to 15s; fail closed (consistent with this tool's
+        // no-fabrication stance) rather than silently grade on salary.
+        const tvDeadline = Date.now() + 15000;
+        let tvLoaded = false;
         while(Date.now() < tvDeadline){
           let s2; try{ s2 = frame.contentWindow.__TVG_BRIDGE__.status(); }catch(e){ break; }
-          if(s2 && s2.tvCount > 0) break;
+          if(s2 && s2.tvCount > 0){ tvLoaded = true; break; }
           await new Promise(r => setTimeout(r, 150));
+        }
+        if(!tvLoaded){
+          throw new Error('Trade values did not load from the sheet — balance would fall '
+            + 'back to salary and would NOT match the Trade Machine. Please retry.');
         }
         return frame;
       }
