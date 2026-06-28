@@ -1085,6 +1085,16 @@ async function generate(){
             selected: false
           };
           pkg.selected = pkgPassesFilter(pkg);
+          try {
+            const _tv = res.teamValuesOut || [];
+            console.log('[TVG dir] ' + res.key
+              + ' | nTeams=' + _tv.length
+              + ' | losingSide=' + losingSide
+              + ' | out=' + _tv.map(v => (v.teamName||'?') + ':' + Math.round((v.valueOut||0)/1e6) + 'M').join(' vs ')
+              + ' | dir=' + getSellingDirection()
+              + ' | bal=' + res.balancePct + '%'
+              + ' | selected=' + pkg.selected);
+          } catch(e){}
           byKey.set(res.key, pkg);
         }
       }else{
