@@ -214,6 +214,10 @@
         <input type="checkbox" id="tryPicks">
         <span>Try to include draft picks <span style="color:var(--muted);font-size:11px">(reverts if illegal)</span></span>
       </label>
+      <label class="checkbox-toggle" title="Only auto-select trades where your selected player is the best (highest trade value) player in the deal — no one better appears on either side, so they're always the headliner.">
+        <input type="checkbox" id="selectedMustBeBest">
+        <span>Selected player must be the best in the trade</span>
+      </label>
       <label class="balance-input" title="Lowest balance % a trade must hit to be auto-checked. Lower = more lopsided trades qualify. 100% means only perfectly balanced trades.">
         <span>Min balance</span>
         <input type="number" id="minBalancePct" min="50" max="100" value="85" step="5"><span style="margin-left:-3px;color:var(--muted)">%</span>
@@ -384,12 +388,35 @@ function detectLosingSide(res){
   return 'balanced';
 }
 
+// True when the "selected player must be the best" toggle is on.
+function getSelectedMustBeBest(){
+  const el = $('selectedMustBeBest');
+  return !!(el && el.checked);
+}
+
+// Whether the user's selected player is the highest-trade-value player in the
+// package (so they're always the headliner). provenance carries every outgoing
+// player's TV across all teams, and in a 2-team trade every player is outgoing
+// from some side — so this covers both sides of the deal. Anchor = best TV among
+// the selected players present; reject if any non-selected player tops it.
+function pkgSelectedIsBest(pkg){
+  if(!selectedPlayers || !selectedPlayers.length) return true;   // nothing selected -> no constraint
+  const prov = pkg && pkg.provenance;
+  if(!prov || !prov.length) return true;                         // can't tell -> don't block
+  const selNames = new Set(selectedPlayers.map(p=>String(p.player||'').trim().toLowerCase()));
+  let anchorTV = 0;
+  prov.forEach(r=>{ if(selNames.has(String(r.player||'').trim().toLowerCase())) anchorTV = Math.max(anchorTV, r.value||0); });
+  if(anchorTV <= 0) return true;                                 // selected player absent / no TV -> don't block
+  return !prov.some(r => !selNames.has(String(r.player||'').trim().toLowerCase()) && (r.value||0) > anchorTV);
+}
+
 // Whether a package passes the auto-select filter under the current settings.
-// Two independent gates: (A) min-balance floor and (B) optional direction
-// constraint on the selling side. Both must pass.
+// Gates: (A) min-balance floor, (B) optional "selected must be the best player",
+// and (C) optional direction constraint on the selling side. All must pass.
 function pkgPassesFilter(pkg){
   const minPct = getMinBalancePct();
   if(pkg.balancePct < minPct) return false;
+  if(getSelectedMustBeBest() && !pkgSelectedIsBest(pkg)) return false;
   const dir = getSellingDirection();
   if(dir === 'any') return true;
   // Direction check only meaningful when we know which side is which.
@@ -2043,7 +2070,7 @@ function onThresholdChange(){
   renderReview();
   updateSelCount();
 }
-['minBalancePct','sellingDirection','maxAge'].forEach(id=>{
+['minBalancePct','sellingDirection','maxAge','selectedMustBeBest'].forEach(id=>{
   const el=$(id);
   if(el){el.addEventListener('change',onThresholdChange);el.addEventListener('input',onThresholdChange)}
 });
