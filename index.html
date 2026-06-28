@@ -1409,13 +1409,23 @@ const TEAM_COLORS = {
   POR:'#E03A3E',SAC:'#5A2D81',SAS:'#C4CED4',TOR:'#CE1141',UTA:'#002B5C',WAS:'#002B5C'
 };
 const TEAM_NAME_TO_ABBR = [
+  // Multi-word cities first so they win before any single-word substring.
+  ['new orleans','NOP'],['new york','NYK'],['san antonio','SAS'],['oklahoma','OKC'],
+  ['golden state','GSW'],['trail','POR'],['los angeles clippers','LAC'],['los angeles lakers','LAL'],
+  // Nicknames.
   ['hawks','ATL'],['celtics','BOS'],['nets','BKN'],['hornets','CHA'],['bulls','CHI'],
   ['cavalier','CLE'],['maverick','DAL'],['nugget','DEN'],['piston','DET'],['warrior','GSW'],
   ['rocket','HOU'],['pacer','IND'],['clipper','LAC'],['laker','LAL'],['grizzl','MEM'],
-  ['heat','MIA'],['buck','MIL'],['timberwolves','MIN'],['wolves','MIN'],['minnesota','MIN'],
+  ['heat','MIA'],['buck','MIL'],['timberwolves','MIN'],['wolves','MIN'],
   ['pelican','NOP'],['knick','NYK'],['thunder','OKC'],['magic','ORL'],['76er','PHI'],['sixers','PHI'],
-  ['phila','PHI'],['suns','PHX'],['phoenix','PHX'],['trail','POR'],['blazer','POR'],['portland','POR'],
-  ['kings','SAC'],['sacramento','SAC'],['spur','SAS'],['raptor','TOR'],['jazz','UTA'],['wizard','WAS']
+  ['suns','PHX'],['blazer','POR'],['kings','SAC'],['spur','SAS'],['raptor','TOR'],
+  ['jazz','UTA'],['wizard','WAS'],
+  // City names (engine often labels teams by city only).
+  ['atlanta','ATL'],['boston','BOS'],['brooklyn','BKN'],['charlotte','CHA'],['chicago','CHI'],
+  ['cleveland','CLE'],['dallas','DAL'],['denver','DEN'],['detroit','DET'],['houston','HOU'],
+  ['indiana','IND'],['memphis','MEM'],['miami','MIA'],['milwaukee','MIL'],['minnesota','MIN'],
+  ['orlando','ORL'],['phila','PHI'],['phoenix','PHX'],['portland','POR'],['sacramento','SAC'],
+  ['toronto','TOR'],['utah','UTA'],['washington','WAS']
 ];
 const FALLBACK_PALETTE = ['#4E79A7','#F28E2B','#E15759','#76B7B2','#59A14F','#B07AA1','#9C755F','#AF7AA1'];
 
@@ -1458,19 +1468,27 @@ function cdnLogo(name){
   const ab = teamAbbr(name); if(!ab) return '';
   const e = ESPN_ABBR[ab]; return e ? ('https://a.espncdn.com/i/teamlogos/nba/500/'+e+'.png') : '';
 }
+// Same NBA mediacentral host/pattern that already loads for all 29 other teams,
+// so a team with a broken sheet URL (Atlanta) falls back to a proven source.
+function mediacentralLogo(name){
+  const ab = teamAbbr(name); if(!ab) return '';
+  const a = ab.toLowerCase();
+  return 'https://mediacentral.nba.com/wp-content/uploads/logos/nba/'+a+'/'+a+'_primary-icon.jpg';
+}
 function logoCandidates(t){
   const fromPlayers = ((t.playersOut||[]).find(p=>p.teamLogo)||{}).teamLogo
                    || ((t.playersIn||[]).find(p=>p.teamLogo)||{}).teamLogo || '';
   const ab = teamAbbr(t.teamName);
   const fromMap = ab ? (teamLogoByAbbr()[ab] || '') : '';
-  const fromCdn = cdnLogo(t.teamName);
+  const fromMedia = mediacentralLogo(t.teamName);   // proven host (all other teams use it)
+  const fromEspn  = cdnLogo(t.teamName);
   const out = [];
-  [fromPlayers, fromMap, fromCdn].forEach(u=>{ if(u && out.indexOf(u)<0) out.push(u); });
+  [fromPlayers, fromMap, fromMedia, fromEspn].forEach(u=>{ if(u && out.indexOf(u)<0) out.push(u); });
   return out;
 }
 function resolvedLogo(side){
   const cands = (side && side.logoCandidates) || (side && side.logo ? [side.logo] : []);
-  for(const u of cands){ const img = imageCache.get(u); if(img) return img; }
+  for(const u of cands){ const img = imageCache.get(u); if(img && img.naturalWidth) return img; }
   return null;
 }
 
@@ -1494,7 +1512,10 @@ function loadImage(url){
   return new Promise(resolve=>{
     const img = new Image();
     img.crossOrigin = 'anonymous';                 // keep the canvas untainted
-    img.onload = ()=>{ imageCache.set(url,img); resolve(img); };
+    img.onload = ()=>{
+      if(!img.naturalWidth || !img.naturalHeight){ imageCache.set(url,null); resolve(null); return; }
+      imageCache.set(url,img); resolve(img);
+    };
     img.onerror = ()=>{ imageCache.set(url,null); resolve(null); };
     img.src = proxied(url);
   });
@@ -1529,8 +1550,9 @@ async function preloadImagesFor(pkgs){
     pkgs.forEach(pkg=>sidesFor(pkg).forEach(side=>{
       if(seen.has(side.teamName)) return; seen.add(side.teamName);
       const cands = side.logoCandidates||[];
-      const okIdx = cands.findIndex(u=>imageCache.get(u));
-      console.log('[TVG logo] '+side.teamName+' -> '+(okIdx>=0?('#'+okIdx):'NONE')+' | '+cands.join(' , '));
+      const detail = cands.map((u,i)=>{ const im=imageCache.get(u); return '#'+i+'['+(im&&im.naturalWidth?('ok '+im.naturalWidth+'x'+im.naturalHeight):'fail')+'] '+u; });
+      const okIdx = cands.findIndex(u=>{ const im=imageCache.get(u); return im && im.naturalWidth; });
+      console.log('[TVG logo] '+side.teamName+' -> '+(okIdx>=0?('#'+okIdx):'NONE')+' | '+detail.join('  ||  '));
     }));
   }catch(e){}
 }
