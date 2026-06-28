@@ -803,6 +803,30 @@ window.__TVG_BRIDGE__ = (function(){
         tradeTeams = result;
         redistributePlayers(true);
 
+        // BACKSTOP: never surface a trade that includes an excluded player, or
+        // (when mustBeBest is on) a player with a higher trade value than the user's
+        // selected player(s). Some engine generation paths (e.g. no-destination)
+        // don't apply the exclude list, so enforce both here at the single chokepoint.
+        var _selSet  = new Set(unifiedSelectedPlayers.map(function(p){return p.player.toLowerCase();}));
+        var _exclSet = new Set((excludedPlayers||[]).map(function(n){return String(n).toLowerCase();}));
+        var _anchorTV = 0;
+        unifiedSelectedPlayers.forEach(function(p){
+          var tv = (typeof getTradeValue==='function' ? getTradeValue(p.player) : 0) || 0;
+          if(tv > _anchorTV) _anchorTV = tv;
+        });
+        var _leak = null;
+        result.forEach(function(t){
+          (t.playersOut||[]).forEach(function(p){
+            var ln = p.player.toLowerCase();
+            if(_exclSet.has(ln)){ _leak = _leak || (p.player + ' (excluded)'); return; }
+            if(opts.mustBeBest && !_selSet.has(ln) && _anchorTV > 0){
+              var tv = (typeof getTradeValue==='function' ? getTradeValue(p.player) : 0) || 0;
+              if(tv > _anchorTV) _leak = _leak || (p.player + ' (better than selected)');
+            }
+          });
+        });
+        if(_leak) return { ok:false, error:'filtered: ' + _leak };
+
         var validation = (typeof validateTrade==='function') ? validateTrade() : null;
 
         // LEGALITY IS ABSOLUTE: only legal trades leave the bridge.
@@ -1031,7 +1055,7 @@ async function generate(){
       const scn = { players: base.players, exclude: base.exclude, from: base.from, to: dest };
       let res;
       try{
-        res = frame.contentWindow.__TVG_BRIDGE__.run(scn, { tryPicks: tryPicks });
+        res = frame.contentWindow.__TVG_BRIDGE__.run(scn, { tryPicks: tryPicks, mustBeBest: getSelectedMustBeBest() });
       }catch(e){
         setStatus('');
         showBanner('err', 'FAILED to read the Trade Machine result: ' + e.message + ' — refusing to fabricate a trade.');
