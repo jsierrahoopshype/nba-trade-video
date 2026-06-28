@@ -339,7 +339,10 @@ const TM_LIVE_ORIGIN = 'https://nba-trade-calculator.thejorgesierra.workers.dev'
 // Can't win) further refines the auto-selection — see pkgPassesFilter.
 const TRADE_QUALITY_TOLERANCE = 0.15;
 const QUALITY_LINE_PCT = Math.round((1 - TRADE_QUALITY_TOLERANCE) * 100); // 85
-const ATTEMPTS_PER_DEST = 24;   // cap per destination team (or total if none chosen)
+const ATTEMPTS_PER_DEST = 35;   // attempts per destination team, per round (or total if none chosen)
+const MAX_MISSES_PER_DEST = 10; // consecutive illegal/duplicate results before moving on this round
+const MAX_GEN_ROUNDS = 6;       // extra passes over the destinations to reach the matching target
+const GLOBAL_ATTEMPT_CAP = 800; // hard ceiling so generation can never hang
 
 // Read the min-balance threshold from the UI. Default 85; 100 means "only
 // perfectly balanced trades qualify." This is the floor regardless of
@@ -1052,9 +1055,18 @@ async function generate(){
   const byKey = new Map();   // key -> package (dedupe by the set of players involved)
   let attempts = 0, illegalSeen = 0;
 
+  // Count how many collected packages currently pass the criteria filter.
+  const matchingNow = () => { let c = 0; for(const p of byKey.values()){ if(pkgPassesFilter(p)) c++; } return c; };
+
+  // Keep doing passes over the destinations until at least TARGET_MIN packages
+  // MATCH the criteria (not merely are legal), bounded by rounds + a hard cap.
+  let round = 0;
+  do {
   for(const dest of destSlugs){
+    if(attempts >= GLOBAL_ATTEMPT_CAP) break;
     let misses = 0;
     for(let i=0; i<ATTEMPTS_PER_DEST; i++){
+      if(attempts >= GLOBAL_ATTEMPT_CAP) break;
       const scn = { players: base.players, exclude: base.exclude, from: base.from, to: dest };
       let res;
       try{
@@ -1103,11 +1115,13 @@ async function generate(){
       }else{
         if(res && res.error === 'illegal') illegalSeen++;
         misses++;
-        if(misses >= 6) break;   // engine has run dry for this destination
+        if(misses >= MAX_MISSES_PER_DEST) break;   // engine run dry for this destination this round
       }
-      if((i & 3) === 0){ setStatus('Collecting… '+byKey.size+' legal package(s) so far ('+attempts+' attempts).'); await sleep(0); }
+      if((i & 3) === 0){ setStatus('Collecting… '+byKey.size+' legal, '+matchingNow()+' match the criteria ('+attempts+' attempts).'); await sleep(0); }
     }
   }
+    round++;
+  } while(matchingNow() < TARGET_MIN && round < MAX_GEN_ROUNDS && attempts < GLOBAL_ATTEMPT_CAP);
 
   collected = Array.from(byKey.values()).sort((a,b)=> b.balancePct - a.balancePct);
 
@@ -1136,29 +1150,66 @@ async function generate(){
 // packages. Returns a human-readable status fragment describing what was done.
 // Assumes `collected` is already sorted by balancePct descending. Uses
 // pkgPassesFilter (min balance + directional constraint).
+// Partner team(s) of a package: every team except the one holding the user's
+// selected player(s) (the selling team, which is the same across all packages).
+function partnersOf(pkg){
+  const selNames = new Set((selectedPlayers||[]).map(p=>String(p.player||'').trim().toLowerCase()));
+  let sellingTeam = null;
+  (pkg.tradeTeams||[]).forEach(t=>{
+    if((t.playersOut||[]).some(p=>selNames.has(String(p.player||'').trim().toLowerCase()))) sellingTeam = t.teamName;
+  });
+  return (pkg.tradeTeams||[]).map(t=>t.teamName).filter(n=>n && n!==sellingTeam);
+}
+
+// Greedy "distinct partner team" pick from a balance-sorted pool: take the best
+// package for each new partner team first, only repeating a team if still short of
+// `floor`. Never exceed `cap`.
+function pickDistinctTeams(pool, floor, cap){
+  const used = new Set();
+  const distinct = [], repeats = [];
+  for(const p of pool){
+    const partners = partnersOf(p);
+    if(partners.length && !partners.some(n=>used.has(n))){
+      distinct.push(p); partners.forEach(n=>used.add(n));
+    } else {
+      repeats.push(p);
+    }
+  }
+  const chosen = distinct.slice(0, cap);
+  for(const p of repeats){           // only repeat a team if below the floor
+    if(chosen.length >= Math.max(floor,1) || chosen.length >= cap) break;
+    chosen.push(p);
+  }
+  return chosen;
+}
+
 function autoSelect(){
   const minPct = getMinBalancePct();
   const dir = getSellingDirection();
-  const aboveLine = collected.filter(p => pkgPassesFilter(p));
+  const aboveLine = collected.filter(p => pkgPassesFilter(p)); // sorted by balance desc
   const dirSuffix = dir==='cantlose' ? ' + selling team can\'t lose'
                    : dir==='cantwin' ? ' + selling team can\'t win'
                    : '';
   const lineDesc = minPct + '%' + dirSuffix;
-  let keepKeys, note;
-  if(aboveLine.length >= TARGET_MAX){
-    keepKeys = new Set(aboveLine.slice(0, TARGET_MAX).map(p => p.key));
-    note = 'Auto-selected top '+TARGET_MAX+' by balance ('+aboveLine.length+' qualified).';
-  } else if(aboveLine.length >= TARGET_MIN){
-    keepKeys = new Set(aboveLine.map(p => p.key));
-    note = 'Auto-selected '+aboveLine.length+' packages above the '+lineDesc+' quality line.';
+  const distinctOf = arr => new Set([].concat.apply([], arr.map(partnersOf))).size;
+  let chosen, note;
+
+  if(aboveLine.length >= TARGET_MIN){
+    // Enough matching packages — prefer distinct partner teams, up to TARGET_MAX,
+    // repeating a team only if needed to clear the TARGET_MIN floor.
+    chosen = pickDistinctTeams(aboveLine, TARGET_MIN, TARGET_MAX);
+    note = 'Auto-selected '+chosen.length+' matching package(s) across '+distinctOf(chosen)+' team(s) above the '+lineDesc+' line.';
   } else {
-    const target = Math.min(TARGET_MIN, collected.length);
-    keepKeys = new Set(collected.slice(0, target).map(p => p.key));
-    const fillCount = target - aboveLine.length;
+    // Fewer than TARGET_MIN matched — keep all that matched, then fill from below
+    // the line by balance (distinct teams first) to reach the minimum.
+    const belowLine = collected.filter(p => !pkgPassesFilter(p));
+    chosen = pickDistinctTeams(aboveLine.concat(belowLine), TARGET_MIN, TARGET_MAX);
+    const fillCount = Math.max(0, chosen.length - aboveLine.length);
     note = aboveLine.length > 0
-      ? 'Auto-selected '+aboveLine.length+' above the line + '+fillCount+' top packages below it to reach the '+TARGET_MIN+'-package minimum.'
-      : 'Auto-selected top '+target+' packages (none reached the '+lineDesc+' quality line).';
+      ? 'Only '+aboveLine.length+' matched the '+lineDesc+' line; added '+fillCount+' more (distinct teams first) to reach '+chosen.length+'.'
+      : 'No packages matched the '+lineDesc+' line; auto-selected '+chosen.length+' by balance (distinct teams first).';
   }
+  const keepKeys = new Set(chosen.map(p=>p.key));
   collected.forEach(p => { p.selected = keepKeys.has(p.key); });
   return note;
 }
