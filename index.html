@@ -267,8 +267,9 @@
             <button data-aspect="9:16" class="active">Vertical 9:16</button>
             <button data-aspect="1:1">Square 1:1</button>
           </div>
-          <button class="btn btn-ghost" id="previewBtn">▶ Preview</button>
-          <button class="btn btn-primary" id="renderBtn">⬤ Render 0 selected</button>
+          <button class="btn btn-ghost" id="previewBtn">▶ Quick preview</button>
+          <button class="btn btn-primary" id="genVideoBtn">● Generate video</button>
+          <button class="btn btn-ghost" id="downloadBtn">⬇ Download video</button>
           <span class="count" id="selCount"></span>
         </div>
         <div class="toggle" id="quizWrap">
@@ -1368,9 +1369,11 @@ function renderReview(){
 function selectedPackages(){ return collected.filter(p=>p.selected); }
 function updateSelCount(){
   const n = selectedPackages().length;
-  $('renderBtn').textContent = '⬤ Render ' + n + ' selected';
+  $('genVideoBtn').textContent = n>1 ? ('● Generate video ('+n+')') : '● Generate video';
   $('previewBtn').disabled = n===0;
-  $('renderBtn').disabled = n===0;
+  $('genVideoBtn').disabled = n===0;
+  $('downloadBtn').disabled = n===0;
+  invalidateVideo();   // selection changed -> any prior recording is stale
   const best = collected.length ? collected[0].balancePct : 0;
   $('selCount').textContent = n ? (n+' selected · best '+best+'%') : 'Select at least one package to render.';
   // quiz mode only meaningful for a single package
@@ -1431,6 +1434,46 @@ function teamColor(name){
   return FALLBACK_PALETTE[h % FALLBACK_PALETTE.length];
 }
 
+/* ---------- team logo fallback (per-player -> picker map -> CDN) ---------- */
+// Some teams' LOGO cell in the roster sheet is blank or points at a URL that
+// fails to load (Atlanta has been the repeat offender). Resolve a logo from
+// the trade's own players first, then a cross-source map built from the picker
+// feed, then an external CDN by abbreviation. Team-agnostic, zero downside.
+let _teamLogoByAbbr = null;
+function teamLogoByAbbr(){
+  if(_teamLogoByAbbr) return _teamLogoByAbbr;
+  const m = {};
+  (pickerPlayers||[]).forEach(p=>{
+    const ab = teamAbbr(p.team);
+    if(ab && p.teamLogo && !m[ab]) m[ab] = p.teamLogo;
+  });
+  if(Object.keys(m).length) _teamLogoByAbbr = m;   // cache once picker data exists
+  return m;
+}
+const ESPN_ABBR = { ATL:'atl',BOS:'bos',BKN:'bkn',CHA:'cha',CHI:'chi',CLE:'cle',DAL:'dal',
+  DEN:'den',DET:'det',GSW:'gs',HOU:'hou',IND:'ind',LAC:'lac',LAL:'lal',MEM:'mem',MIA:'mia',
+  MIL:'mil',MIN:'min',NOP:'no',NYK:'ny',OKC:'okc',ORL:'orl',PHI:'phi',PHX:'phx',POR:'por',
+  SAC:'sac',SAS:'sa',TOR:'tor',UTA:'utah',WAS:'wsh' };
+function cdnLogo(name){
+  const ab = teamAbbr(name); if(!ab) return '';
+  const e = ESPN_ABBR[ab]; return e ? ('https://a.espncdn.com/i/teamlogos/nba/500/'+e+'.png') : '';
+}
+function logoCandidates(t){
+  const fromPlayers = ((t.playersOut||[]).find(p=>p.teamLogo)||{}).teamLogo
+                   || ((t.playersIn||[]).find(p=>p.teamLogo)||{}).teamLogo || '';
+  const ab = teamAbbr(t.teamName);
+  const fromMap = ab ? (teamLogoByAbbr()[ab] || '') : '';
+  const fromCdn = cdnLogo(t.teamName);
+  const out = [];
+  [fromPlayers, fromMap, fromCdn].forEach(u=>{ if(u && out.indexOf(u)<0) out.push(u); });
+  return out;
+}
+function resolvedLogo(side){
+  const cands = (side && side.logoCandidates) || (side && side.logo ? [side.logo] : []);
+  for(const u of cands){ const img = imageCache.get(u); if(img) return img; }
+  return null;
+}
+
 /* ------------------------------ color utils ------------------------------ */
 function hexToRgb(h){ h=h.replace('#',''); if(h.length===3) h=h.split('').map(c=>c+c).join('');
   return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)]; }
@@ -1461,8 +1504,8 @@ function loadImage(url){
 function sidesFor(pkg){
   const teams = (pkg && pkg.tradeTeams) ? pkg.tradeTeams : [];
   return teams.map(t=>{
-    const logo = ((t.playersOut||[]).find(p=>p.teamLogo)||{}).teamLogo
-              || ((t.playersIn||[]).find(p=>p.teamLogo)||{}).teamLogo || '';
+    const _cands = logoCandidates(t);
+    const logo = _cands[0] || '';
     const chips = [];
     (t.playersOut||[]).forEach(p=>chips.push({ kind:'player', name:p.player, sub:(p.position||p.team||''),
       salary:p.salary||0, headshot:p.headshot||'' }));
@@ -1470,16 +1513,26 @@ function sidesFor(pkg){
     (t.rightsOut||[]).forEach(r=>chips.push({ kind:'rights', name:(r.playerName||pickLabel(r)), sub:'Draft rights', salary:0, headshot:'' }));
     const total = chips.reduce((s,c)=>s+c.salary,0);
     const inSalary = (t.playersIn||[]).reduce((s,p)=>s+(p.salary||0),0);
-    return { teamName:t.teamName, color:teamColor(t.teamName), logo, chips, total, inSalary };
+    return { teamName:t.teamName, color:teamColor(t.teamName), logo, logoCandidates:_cands, chips, total, inSalary };
   });
 }
 async function preloadImagesFor(pkgs){
   const urls = new Set();
   pkgs.forEach(pkg=>sidesFor(pkg).forEach(side=>{
-    if(side.logo) urls.add(side.logo);
+    (side.logoCandidates || (side.logo?[side.logo]:[])).forEach(u=>urls.add(u));
     side.chips.forEach(c=>{ if(c.headshot) urls.add(c.headshot); });
   }));
   await Promise.all([...urls].map(loadImage));
+  // One-shot logo diagnostic: which candidate (#0 sheet -> #1 picker map -> #2 CDN) won per team.
+  try{
+    const seen=new Set();
+    pkgs.forEach(pkg=>sidesFor(pkg).forEach(side=>{
+      if(seen.has(side.teamName)) return; seen.add(side.teamName);
+      const cands = side.logoCandidates||[];
+      const okIdx = cands.findIndex(u=>imageCache.get(u));
+      console.log('[TVG logo] '+side.teamName+' -> '+(okIdx>=0?('#'+okIdx):'NONE')+' | '+cands.join(' , '));
+    }));
+  }catch(e){}
 }
 
 /* ------------------------------ layout map ------------------------------- */
@@ -1595,7 +1648,7 @@ function drawChip(c,x,y,w,h,chip,color,alpha){
 
 function drawTeamHeader(c,col,side,dollars){
   const y=col.y-66;
-  const logo=side.logo?imageCache.get(side.logo):null;
+  const logo=resolvedLogo(side);
   let tx=col.x;
   if(logo){ c.drawImage(logo,col.x,y,48,48); tx=col.x+60; }
   else { c.beginPath(); c.arc(col.x+22,y+24,22,0,Math.PI*2); c.fillStyle=side.color; c.fill(); tx=col.x+58; }
@@ -1653,7 +1706,7 @@ function getTeamBlocks(layout, n){
 // Compact in-block header with the team's animated OUT and IN totals (delta).
 function drawCompactHeader(c, block, side, phaseStart, t){
   const y=block.y+6;
-  const logo=side.logo?imageCache.get(side.logo):null;
+  const logo=resolvedLogo(side);
   let tx=block.x+4;
   if(logo){ c.drawImage(logo,block.x+4,y,40,40); tx=block.x+52; }
   else { c.beginPath(); c.arc(block.x+24,y+20,20,0,Math.PI*2); c.fillStyle=side.color; c.fill(); tx=block.x+52; }
@@ -1800,7 +1853,7 @@ function drawHook(c,layout,alpha,t,sides){
   [0,1].forEach(i=>{
     const s=sides[i]; if(!s) return;
     const cx = i===0 ? layout.W/2-gap-rr : layout.W/2+gap+rr;
-    const logo=s.logo?imageCache.get(s.logo):null;
+    const logo=resolvedLogo(s);
     c.save(); c.translate(0,-rise);
     c.beginPath(); c.arc(cx,cy,rr,0,Math.PI*2); c.fillStyle=s.color; c.fill();
     c.lineWidth=4; c.strokeStyle='rgba(255,255,255,0.6)'; c.stroke();
@@ -1963,7 +2016,7 @@ function drawSegment(c,layout,seg,t,optionNumber){
     [0,1].forEach(i=>{
       const s=sides[i]; if(!s) return;
       const cx = i===0 ? layout.W/2-gap-rr : layout.W/2+gap+rr;
-      const logo=s.logo?imageCache.get(s.logo):null;
+      const logo=resolvedLogo(s);
       c.save(); c.translate(0,-rise);
       c.beginPath(); c.arc(cx,cy,rr,0,Math.PI*2); c.fillStyle=s.color; c.fill();
       c.lineWidth=4; c.strokeStyle='rgba(255,255,255,0.6)'; c.stroke();
@@ -2072,11 +2125,24 @@ async function ensureFonts(){
   }catch(e){/* fall back to sans-serif */}
 }
 
+/* ---- generated-video state: Generate previews into <video>, Download saves ---- */
+let lastVideoBlob = null, lastVideoName = '';
+function invalidateVideo(){ lastVideoBlob = null; }
+function downloadLastVideo(){
+  if(!lastVideoBlob) return false;
+  const url = URL.createObjectURL(lastVideoBlob);
+  const a = document.createElement('a'); a.href = url; a.download = lastVideoName || 'trade.webm';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url), 5000);
+  setRenderStatus('Saved ' + a.download + '.');
+  return true;
+}
+
 function runAnimation(record, doDownload){
-  // doDownload defaults true (existing call-sites unaffected). The auto-
-  // render after renderReview() passes false so the user gets a playable
-  // <video> in the second block without a surprise file download every
-  // time they generate. The Render button still downloads explicitly.
+  // doDownload defaults true. "● Generate video" passes false (record into the
+  // <video> for preview, no file); "⬇ Download video" saves it. The auto-record
+  // after renderReview() also passes false, so generating a scenario yields a
+  // playable preview without a surprise download.
   if (doDownload === undefined) doDownload = true;
   return new Promise(async (resolve,reject)=>{
     if(animating) return resolve();
@@ -2098,16 +2164,17 @@ function runAnimation(record, doDownload){
       recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
       recorder.onstop=()=>{
         const blob=new Blob(chunks,{type:'video/webm'});
+        const n=selectedPackages().length;
+        lastVideoBlob = blob;
+        lastVideoName = `trade-${n>1?n+'pkg-':''}${getAspect().replace(':','x')}.webm`;
         const url=URL.createObjectURL(blob);
         const v=$('out'); v.src=url; v.style.display='block';
         if (doDownload) {
-          const a=document.createElement('a'); a.href=url;
-          const n=selectedPackages().length;
-          a.download=`trade-${n>1?n+'pkg-':''}${getAspect().replace(':','x')}.webm`;
+          const a=document.createElement('a'); a.href=url; a.download=lastVideoName;
           document.body.appendChild(a); a.click(); a.remove();
-          setRenderStatus('Saved '+a.download+' — check it plays above.');
+          setRenderStatus('Saved '+lastVideoName+' — it\u2019s playing above.');
         } else {
-          setRenderStatus('Video ready — click ⬤ Render to save the .webm file.');
+          setRenderStatus('Video generated — press \u201c\u2b07 Download video\u201d to save it.');
         }
         animating=false; resolve();
       };
@@ -2128,6 +2195,7 @@ function setRenderStatus(t){ $('renderStatus').textContent=t||''; }
 
 async function renderStaticPreview(){
   if(!collected.length) return;
+  invalidateVideo();   // aspect/quiz/timing changed -> any prior recording is stale
   await ensureFonts();
   await preloadImagesFor(selectedPackages().length?selectedPackages():[collected[0]]);
   prepareRenderFromSelection();
@@ -2153,12 +2221,20 @@ $('previewBtn').addEventListener('click', async ()=>{
   try{ await runAnimation(false); setRenderStatus('Preview done.'); }
   catch(e){ setRenderStatus('Preview error: '+e.message); animating=false; }
 });
-$('renderBtn').addEventListener('click', async ()=>{
+$('genVideoBtn').addEventListener('click', async ()=>{
   if(!selectedPackages().length){ setRenderStatus('Select a package first.'); return; }
   if(!window.MediaRecorder){ setRenderStatus('MediaRecorder not supported in this browser.'); return; }
-  setRenderStatus('Recording…');
-  try{ await runAnimation(true); }
-  catch(e){ setRenderStatus('Recording error: '+e.message); animating=false; }
+  setRenderStatus('Generating video…');
+  try{ await runAnimation(true, false); }   // record into <video> for preview, no download
+  catch(e){ setRenderStatus('Generate error: '+e.message); animating=false; }
+});
+$('downloadBtn').addEventListener('click', async ()=>{
+  if(!selectedPackages().length){ setRenderStatus('Select a package first.'); return; }
+  if(lastVideoBlob){ downloadLastVideo(); return; }   // save the exact clip you previewed
+  if(!window.MediaRecorder){ setRenderStatus('MediaRecorder not supported in this browser.'); return; }
+  setRenderStatus('Rendering video to download…');
+  try{ await runAnimation(true, true); }    // nothing generated yet -> render + save
+  catch(e){ setRenderStatus('Download error: '+e.message); animating=false; }
 });
 
 /* ------------------------------- wiring ------------------------------- */
