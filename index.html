@@ -891,13 +891,16 @@ window.__TVG_BRIDGE__ = (function(){
         // sub-All-Stars" register as unbalanced instead of ~even on raw value.
         // Falls back to plain min/max value if the engine fn is unavailable.
         var bal = (typeof calculateTradeBalance==='function') ? calculateTradeBalance(clean) : null;
-        var teamValuesOut = (bal && bal.details && bal.details.length)
-          ? bal.details.map(function(d){ return { teamName:d.teamName, valueOut:d.out }; })
-          : clean.map(function(t){
-              var s = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
-              s += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
-              return { teamName: t.teamName, valueOut: s };
-            });
+        // teamValuesOut drives the "selling wins/loses" direction ONLY. Use RAW asset
+        // value (players + picks, no best-player premium / filler discount) so it
+        // matches the per-player value breakdown the user sees: e.g. Brown ($41.6M)
+        // for Morant ($27M) + four picks reads as the seller WINNING, not losing.
+        // The balance GRADE (balancePct below) still uses the premium-adjusted model.
+        var teamValuesOut = clean.map(function(t){
+          var s = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
+          s += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
+          return { teamName: t.teamName, valueOut: s };
+        });
 
         return {
           ok:true,
