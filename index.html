@@ -741,7 +741,9 @@ window.__TVG_BRIDGE__ = (function(){
                     count: (typeof players!=='undefined' && players ? players.length : 0),
                     hasGenerate: (typeof generateUnifiedTrade==='function'),
                     hasAddPicks: (typeof addPicksToTrade==='function'),
-                    tvCount: (typeof tradeValueMapLower!=='undefined' && tradeValueMapLower ? tradeValueMapLower.size : 0) }; }
+                    tvCount: (typeof tradeValueMapLower!=='undefined' && tradeValueMapLower ? tradeValueMapLower.size : 0),
+                    tradeDatesLoaded: (typeof tradeDateMap!=='undefined' && tradeDateMap ? tradeDateMap.size : 0),
+                    signingDatesLoaded: (typeof signingDateMap!=='undefined' && signingDateMap ? signingDateMap.size : 0) }; }
       catch(e){ return { dataReady:false, count:0, hasGenerate:false, error:String(e) }; }
     },
     run: function(scn, opts){
@@ -965,6 +967,22 @@ function loadTradeMachine(){
         if(!tvLoaded){
           throw new Error('Trade values did not load from the sheet — balance would fall '
             + 'back to salary and would NOT match the Trade Machine. Please retry.');
+        }
+        // Also wait for the restriction tables (recent-trade no-aggregation +
+        // signing-date cooling) so generated trades are validated WITH those rules
+        // applied — otherwise a player like Naz Reid / Nicolas Claxton can be
+        // aggregated before their flag is set. Best-effort (proceed after the cap)
+        // since, unlike trade values, a missing table doesn't break grading globally.
+        const rDeadline = Date.now() + 10000;
+        let restrLoaded = false;
+        while(Date.now() < rDeadline){
+          let s3; try{ s3 = frame.contentWindow.__TVG_BRIDGE__.status(); }catch(e){ break; }
+          if(s3 && s3.tradeDatesLoaded > 0 && s3.signingDatesLoaded > 0){ restrLoaded = true; break; }
+          await new Promise(r => setTimeout(r, 150));
+        }
+        if(!restrLoaded){
+          console.warn('[TVG] restriction tables not fully loaded before generating — '
+            + 'no-aggregation/cooling rules may be incomplete this run.');
         }
         return frame;
       }
