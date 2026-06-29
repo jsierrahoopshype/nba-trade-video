@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NBA Trade Video Generator — HoopsMatic</title>
-<!-- HoopsMatic · Trade Video Generator · build mov-1 (H.264/MP4 → .mov download, WebM fallback) -->
+<!-- HoopsMatic · Trade Video Generator · build mov-2 (native .mov + optional in-browser ffmpeg.wasm true-MOV conversion) -->
 <!-- PapaParse is used only to read /api/salaries for the player/team pickers. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <!-- DM Sans for the page chrome (matches HoopsMatic apps). Poppins is also
@@ -276,6 +276,10 @@
         <div class="toggle" id="quizWrap">
           <input type="checkbox" id="quizMode">
           <label for="quizMode" style="margin:0">Quiz mode — freeze on “what completes this?” before the reveal (single package only)</label>
+        </div>
+        <div class="toggle" id="ffmpegWrap">
+          <input type="checkbox" id="useFfmpeg" checked>
+          <label for="useFfmpeg" style="margin:0">Convert to true .MOV in-browser (ffmpeg) — works on any browser incl. Firefox. First use downloads ~25 MB; uncheck for the instant native save.</label>
         </div>
         <div class="timing" id="timingPanel">
           <div class="timing-title">Timing <span style="color:#5d6b82;font-weight:400">(read at render time)</span></div>
@@ -2157,18 +2161,72 @@ function saveBlob(blob, name){
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url), 5000);
 }
-function downloadLastVideo(){
+
+/* --- in-browser .MOV conversion via ffmpeg.wasm (single-threaded core, so it
+   runs on plain GitHub Pages with no cross-origin-isolation headers) ---------
+   MP4 input  -> stream-copy remux to a true QuickTime-branded .mov (fast).
+   WebM input -> re-encode VP9 to H.264 .mov (slower; the Firefox path).
+   Lazy-loaded on first use so the ~25 MB core doesn't hit normal page loads. */
+const FFMPEG_JS   = 'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js';
+const FFMPEG_CORE = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.11.0/dist/ffmpeg-core.js';
+let _ffmpeg = null, _ffmpegLoading = null;
+function loadScript(src){
+  return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=src;
+    s.onload=res; s.onerror=()=>rej(new Error('failed to load '+src)); document.head.appendChild(s); });
+}
+async function ensureFfmpeg(){
+  if(_ffmpeg) return _ffmpeg;
+  if(_ffmpegLoading) return _ffmpegLoading;
+  _ffmpegLoading = (async()=>{
+    if(typeof FFmpeg === 'undefined') await loadScript(FFMPEG_JS);
+    const { createFFmpeg, fetchFile } = FFmpeg;
+    const ff = createFFmpeg({ log:false, corePath:FFMPEG_CORE,
+      progress: ({ratio})=>{ if(ratio>=0 && ratio<=1) setRenderStatus('Converting to .MOV\u2026 '+Math.round(ratio*100)+'%'); } });
+    await ff.load();
+    _ffmpeg = { ff, fetchFile };
+    return _ffmpeg;
+  })();
+  return _ffmpegLoading;
+}
+async function convertToMov(blob, type){
+  const { ff, fetchFile } = await ensureFfmpeg();
+  const isMp4 = type === 'video/mp4';
+  const inName = isMp4 ? 'in.mp4' : 'in.webm';
+  ff.FS('writeFile', inName, await fetchFile(blob));
+  const args = isMp4
+    ? ['-i', inName, '-c', 'copy', '-movflags', '+faststart', 'out.mov']
+    : ['-i', inName, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', 'out.mov'];
+  await ff.run(...args);
+  const data = ff.FS('readFile', 'out.mov');
+  try{ ff.FS('unlink', inName); ff.FS('unlink', 'out.mov'); }catch(e){}
+  return new Blob([data.buffer], {type:'video/quicktime'});
+}
+function movNameFrom(name){ return (name||'trade').replace(/\.(webm|mp4|mov)$/i,'') + '.mov'; }
+
+async function downloadLastVideo(){
   if(!lastVideoBlob) return false;
-  // Browsers can't record a true QuickTime .mov, but H.264/MP4 is structurally
-  // MOV-compatible: re-wrapping the same bytes as video/quicktime with a .mov
-  // extension yields a file QuickTime, Final Cut, Premiere, and DaVinci open.
-  // If only WebM was available (e.g. Firefox), save the real format instead.
+  const useFf = $('useFfmpeg') && $('useFfmpeg').checked;
+  if(useFf){
+    try{
+      setRenderStatus('Loading converter (first use downloads ~25\u00A0MB)\u2026');
+      const movBlob = await convertToMov(lastVideoBlob, lastVideoType);
+      const movName = movNameFrom(lastVideoName);
+      saveBlob(movBlob, movName);
+      setRenderStatus('Saved ' + movName + ' (true .MOV via ffmpeg).');
+      return true;
+    }catch(e){
+      setRenderStatus('ffmpeg conversion failed (' + (e && e.message || e) + ') \u2014 saving native format instead.');
+      // fall through to the native path below
+    }
+  }
+  // Native path: MP4 bytes re-wrapped as video/quicktime are MOV-compatible;
+  // WebM (Firefox, ffmpeg off) is saved as-is since a renamed .mov would break.
   if(lastVideoType === 'video/mp4'){
     saveBlob(new Blob([lastVideoBlob], {type:'video/quicktime'}), lastVideoName);
     setRenderStatus('Saved ' + lastVideoName + '.');
   } else {
     saveBlob(lastVideoBlob, lastVideoName);
-    setRenderStatus('Saved ' + lastVideoName + ' (WebM \u2014 this browser can\u2019t record MOV; use Chrome or Safari for .mov).');
+    setRenderStatus('Saved ' + lastVideoName + ' (WebM \u2014 tick \u201cConvert to true .MOV\u201d for a .mov file).');
   }
   return true;
 }
