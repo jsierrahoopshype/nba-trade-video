@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>NBA Trade Video Generator — HoopsMatic</title>
+<!-- HoopsMatic · Trade Video Generator · build mov-1 (H.264/MP4 → .mov download, WebM fallback) -->
 <!-- PapaParse is used only to read /api/salaries for the player/team pickers. -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 <!-- DM Sans for the page chrome (matches HoopsMatic apps). Poppins is also
@@ -1397,7 +1398,7 @@ function pickLabel(pk){
 
    Single selected package  -> the original single-trade timeline (quiz ok).
    Multiple selected         -> a multi-segment countdown video (no quiz).
-   Output: canvas + MediaRecorder webm.
+   Output: canvas + MediaRecorder (H.264/MP4 -> .mov download; WebM fallback).
    ============================================================================ */
 
 /* ----- NBA team colors (primary), from the Bar Chart Race config ----- */
@@ -2148,15 +2149,27 @@ async function ensureFonts(){
 }
 
 /* ---- generated-video state: Generate previews into <video>, Download saves ---- */
-let lastVideoBlob = null, lastVideoName = '';
-function invalidateVideo(){ lastVideoBlob = null; }
-function downloadLastVideo(){
-  if(!lastVideoBlob) return false;
-  const url = URL.createObjectURL(lastVideoBlob);
-  const a = document.createElement('a'); a.href = url; a.download = lastVideoName || 'trade.webm';
+let lastVideoBlob = null, lastVideoName = '', lastVideoType = '';
+function invalidateVideo(){ lastVideoBlob = null; lastVideoType = ''; }
+function saveBlob(blob, name){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
   setTimeout(()=>URL.revokeObjectURL(url), 5000);
-  setRenderStatus('Saved ' + a.download + '.');
+}
+function downloadLastVideo(){
+  if(!lastVideoBlob) return false;
+  // Browsers can't record a true QuickTime .mov, but H.264/MP4 is structurally
+  // MOV-compatible: re-wrapping the same bytes as video/quicktime with a .mov
+  // extension yields a file QuickTime, Final Cut, Premiere, and DaVinci open.
+  // If only WebM was available (e.g. Firefox), save the real format instead.
+  if(lastVideoType === 'video/mp4'){
+    saveBlob(new Blob([lastVideoBlob], {type:'video/quicktime'}), lastVideoName);
+    setRenderStatus('Saved ' + lastVideoName + '.');
+  } else {
+    saveBlob(lastVideoBlob, lastVideoName);
+    setRenderStatus('Saved ' + lastVideoName + ' (WebM \u2014 this browser can\u2019t record MOV; use Chrome or Safari for .mov).');
+  }
   return true;
 }
 
@@ -2179,24 +2192,30 @@ function runAnimation(record, doDownload){
     let recorder=null, chunks=[];
     if(record){
       const stream=canvas.captureStream(60);
-      let mime=''; for(const m of ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']){
+      // Prefer H.264/MP4 so the clip can be delivered as a QuickTime-compatible
+      // .mov; fall back to WebM where MP4 recording isn't supported (Firefox).
+      let mime='';
+      for(const m of ['video/mp4;codecs=avc1.42E01E','video/mp4;codecs=h264','video/mp4;codecs=avc1','video/mp4','video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']){
         if(window.MediaRecorder && MediaRecorder.isTypeSupported(m)){ mime=m; break; } }
+      const isMp4 = mime.indexOf('video/mp4')===0;
+      const recType = isMp4 ? 'video/mp4' : 'video/webm';
       try{ recorder=new MediaRecorder(stream, mime?{mimeType:mime,videoBitsPerSecond:12000000}:undefined); }
       catch(e){ animating=false; return reject(e); }
       recorder.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
       recorder.onstop=()=>{
-        const blob=new Blob(chunks,{type:'video/webm'});
+        const blob=new Blob(chunks,{type:recType});
         const n=selectedPackages().length;
+        const ext = isMp4 ? 'mov' : 'webm';
         lastVideoBlob = blob;
-        lastVideoName = `trade-${n>1?n+'pkg-':''}${getAspect().replace(':','x')}.webm`;
+        lastVideoType = recType;
+        lastVideoName = `trade-${n>1?n+'pkg-':''}${getAspect().replace(':','x')}.${ext}`;
+        // Preview uses the real recorded type so the on-page <video> plays it.
         const url=URL.createObjectURL(blob);
         const v=$('out'); v.src=url; v.style.display='block';
         if (doDownload) {
-          const a=document.createElement('a'); a.href=url; a.download=lastVideoName;
-          document.body.appendChild(a); a.click(); a.remove();
-          setRenderStatus('Saved '+lastVideoName+' — it\u2019s playing above.');
+          downloadLastVideo();   // .mov-aware save (re-wraps MP4 as video/quicktime)
         } else {
-          setRenderStatus('Video generated — press \u201c\u2b07 Download video\u201d to save it.');
+          setRenderStatus('Video generated \u2014 press \u201c\u2b07 Download video\u201d to save it.');
         }
         animating=false; resolve();
       };
