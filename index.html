@@ -200,7 +200,7 @@
       </div>
 
       <div class="field">
-        <label>FROM</label>
+        <label title="The team building the offer. With a Player set, this is the team trying to ACQUIRE that player — you get the best package that team can put together.">OFFERING TEAM</label>
         <select id="fromTeam" class="team-select"><option value="">Any team…</option></select>
       </div>
 
@@ -221,6 +221,11 @@
       </div>
 
       <button class="btn btn-primary" id="genBtn" disabled>⚙ Generate</button>
+    </div>
+    <div class="hint" style="margin-top:8px">
+      💡 <b>Offering team + Player</b> = the best packages that team can offer to acquire that player
+      (e.g. Offering team = Lakers, Player = Luka). <b>Player</b> alone = who else would take them.
+      <b>TO</b> also names acquiring team(s); a named target player is required for the “offer for a player” video.
     </div>
 
     <div class="secondary-row">
@@ -256,9 +261,13 @@
     <!-- ===================== REAL TRADES MODE ===================== -->
     <div id="realTools" style="display:none">
       <div class="scenario-row">
-        <div class="field" style="flex:2 1 320px">
-          <label>MOST-BUILT TRADES INVOLVING PLAYER (optional)</label>
-          <input type="text" id="realFilter" placeholder="e.g. Chet Holmgren — leave blank for every trade" autocomplete="off">
+        <div class="field" style="flex:2 1 240px">
+          <label>INVOLVING PLAYER (optional)</label>
+          <input type="text" id="realFilter" placeholder="e.g. Chet Holmgren" autocomplete="off">
+        </div>
+        <div class="field" style="flex:2 1 200px">
+          <label>INVOLVING TEAM (optional)</label>
+          <input type="text" id="realTeamFilter" placeholder="e.g. Lakers — either side of the deal" autocomplete="off">
         </div>
         <button class="btn btn-primary" id="loadRealBtn">↻ Load most-built trades</button>
       </div>
@@ -319,8 +328,6 @@
               <input type="text" id="tSingle" value="" placeholder="auto" inputmode="decimal"></label>
             <label>Intro sec
               <input type="text" id="tIntro" value="2.2" inputmode="decimal"></label>
-            <label>Final card sec
-              <input type="text" id="tFinal" value="2.8" inputmode="decimal"></label>
             <label>Speed × (chips/counters) <span style="color:#5d6b82">0.5–2</span>
               <input type="text" id="tSpeed" value="1.0" inputmode="decimal"></label>
           </div>
@@ -689,28 +696,15 @@ function renderTeamChips(chipsId, list, onChange){
 
 // Auto-lock the FROM team field to the selected player(s)'s team. If all
 // selected players come from the same team, lock FROM to that team —
-// Giannis is on Milwaukee, you can't trade him "from Boston." If the
-// selection is empty or spans multiple teams, leave FROM unlocked.
+// FROM is the OFFERING team — the team building the package. In the player
+// path it names who assembles assets to ACQUIRE the selected player (e.g.
+// From = Lakers + Player = Luka → the best packages the Lakers can offer for
+// Luka). Always user-selectable; never auto-locked to the player's own team
+// (that team is the seller and is derived by the engine, not chosen here).
 function updateFromTeamLock(){
   const fromSel = $('fromTeam');
   if (!fromSel) return;
-  if (selectedPlayers.length === 0) {
-    fromSel.disabled = false;
-    return;
-  }
-  const teams = new Set(selectedPlayers.map(p => p.team));
-  if (teams.size === 1) {
-    const team = [...teams][0];
-    // Set the value only if the option exists (defensive — teams list is
-    // loaded asynchronously, the option should always exist by the time a
-    // player is pickable, but better safe).
-    if ([...fromSel.options].some(o => o.value === team)) {
-      fromSel.value = team;
-    }
-    fromSel.disabled = true;
-  } else {
-    fromSel.disabled = false;
-  }
+  fromSel.disabled = false;
 }
 
 /* =====================================================================
@@ -1094,8 +1088,20 @@ async function generate(){
     return;
   }
 
+  // Destination = the ACQUIRING / offering team. In the player path the engine
+  // assembles the destination team's assets to land the target player (the
+  // `from`/origin param is inert once a player is set), so "what can team X
+  // offer for player Y" = player Y with X as the destination. Accept that
+  // offering team from the TO chips AND from the FROM (offering-team) select,
+  // excluding the player's own team (they can't acquire their own player).
+  const offerTeams = selectedToTeams.slice();
+  const fromVal = $('fromTeam').value;
+  if(base.players.length && fromVal){
+    const ownTeams = new Set(selectedPlayers.map(p=>p.team));
+    if(!ownTeams.has(fromVal) && !offerTeams.includes(fromVal)) offerTeams.push(fromVal);
+  }
   // One scenario per destination team; if none chosen, one "any" pass.
-  const destSlugs = selectedToTeams.length ? selectedToTeams.map(slugify) : [''];
+  const destSlugs = offerTeams.length ? offerTeams.map(slugify) : [''];
   const tryPicks = $('tryPicks').checked;
 
   const byKey = new Map();   // key -> package (dedupe by the set of players involved)
@@ -1113,7 +1119,12 @@ async function generate(){
     let misses = 0;
     for(let i=0; i<ATTEMPTS_PER_DEST; i++){
       if(attempts >= GLOBAL_ATTEMPT_CAP) break;
-      const scn = { players: base.players, exclude: base.exclude, from: base.from, to: dest };
+      // With a player selected, the offering team is carried as the destination
+      // (above), and the engine derives the seller — so `from` is left empty to
+      // avoid an inert/conflicting origin. Without a player, `from` drives the
+      // team-involving / team↔team paths as before.
+      const scn = { players: base.players, exclude: base.exclude,
+                    from: base.players.length ? '' : base.from, to: dest };
       let res;
       try{
         res = frame.contentWindow.__TVG_BRIDGE__.run(scn, { tryPicks: tryPicks, mustBeBest: getSelectedMustBeBest() });
@@ -1355,7 +1366,10 @@ function buildRealDeals(rows){
     if(!d){
       const tradeTeams = tradeTeamsFromLegs(legs);
       d = { key, buildCount:0, tradeTeams, balancePct: balanceFromTeams(tradeTeams),
-            players: [...new Set(legs.map(l=>l.player))] };
+            players: [...new Set(legs.map(l=>l.player))],
+            // Every team involved on EITHER side (from_team OR to_team) — used by
+            // the team filter ("involved at all", not directional).
+            teams: [...new Set([].concat(...legs.map(l=>[l.from,l.to])))] };
       byKey.set(key, d);
     }
     d.buildCount++;
@@ -1398,27 +1412,37 @@ async function loadRealTrades(){
   applyRealFilter();
   if(btn) btn.disabled=false;
 }
-// Filter by "involving player X" (substring on player names) and (re)build the
-// ranked package list. No refetch — filters the already-loaded deals live.
+// Resolve the display name that best matches a substring query across the given
+// deals, weighted by build frequency (used for the "FOR <name>" intro label).
+function resolveFilterName(deals, q, field){
+  if(!q) return '';
+  const counts={};
+  deals.forEach(d=> (d[field]||[]).forEach(n=>{ if(n.toLowerCase().includes(q)) counts[n]=(counts[n]||0)+d.buildCount; }));
+  let best='', bc=-1; Object.keys(counts).forEach(n=>{ if(counts[n]>bc){bc=counts[n]; best=n;} });
+  return best;
+}
+// Filter by "involving player X" and/or "involving team Y" (substring match).
+// Team match = the team is on EITHER side of the trade. Both filters combine
+// (Lakers + Luka) and each works alone. No refetch — filters loaded deals live.
 function applyRealFilter(){
-  const q = (($('realFilter')||{}).value||'').trim().toLowerCase();
+  const pq = (($('realFilter')||{}).value||'').trim().toLowerCase();
+  const tq = (($('realTeamFilter')||{}).value||'').trim().toLowerCase();
   realFilterName='';
   let deals = realDeals;
-  if(q){
-    deals = realDeals.filter(d=> d.players.some(n=>n.toLowerCase().includes(q)));
-    // resolve a display name = the matching player built most across the results
-    const counts={};
-    deals.forEach(d=> d.players.forEach(n=>{ if(n.toLowerCase().includes(q)) counts[n]=(counts[n]||0)+d.buildCount; }));
-    let best='', bc=-1; Object.keys(counts).forEach(n=>{ if(counts[n]>bc){bc=counts[n]; best=n;} });
-    realFilterName = best;
-  }
+  if(pq) deals = deals.filter(d=> d.players.some(n=>n.toLowerCase().includes(pq)));
+  if(tq) deals = deals.filter(d=> (d.teams||[]).some(n=>n.toLowerCase().includes(tq)));
+  // Intro "FOR <…>" label: prefer the player name; fall back to the team name.
+  realFilterName = resolveFilterName(deals, pq, 'players') || resolveFilterName(deals, tq, 'teams');
   collected = deals.map(dealToPackage);   // already ranked by build count
   const N = Math.min(collected.length, REAL_AUTOSELECT);
   collected.forEach((p,idx)=> p.selected = idx<N);
   if(!collected.length){
+    const parts = [];
+    if(pq) parts.push('player “'+escapeHtml(pq)+'”');
+    if(tq) parts.push('team “'+escapeHtml(tq)+'”');
     $('reviewWrap').style.display='none';
     $('empty').style.display='block';
-    $('empty').innerHTML = 'No real trades involve “'+escapeHtml(q)+'”. Clear the filter to see every deal.';
+    $('empty').innerHTML = 'No real trades match '+(parts.join(' + ')||'that filter')+'. Clear the filter(s) to see every deal.';
     return;
   }
   renderReview();
@@ -2088,8 +2112,10 @@ function buildSingleTimeline(sides, quizMode, chipDur, chipStagger){
     win.teams.push({s:t,e:t+d}); t+=d;
   }
   win.meter={s:t,e:t+1.4}; t+=1.4;
+  // Ends on the verdict — no trailing vote/brand card. A short hold lets the
+  // LEGAL stamp + message linger before the clip cuts.
   win.verdict={s:t,e:t+1.6}; t+=1.6;
-  win.end={s:t,e:t+1.5}; t+=1.5;
+  win.hold={s:t,e:t+0.6}; t+=0.6;
   return { win, total:t, hasGate:!!quizMode };
 }
 // scale every {s,e} window (and nested arrays) by f — keeps proportions at any duration.
@@ -2156,21 +2182,6 @@ function drawVerdict(c,layout,t,pkg){
     c.globalAlpha=1;
   }
 }
-function drawEndCard(c,layout,alpha){
-  c.save(); c.globalAlpha=alpha; c.fillStyle='rgba(15,12,41,0.93)'; c.fillRect(0,0,layout.W,layout.H);
-  c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
-  F(c,800,layout.aspect==='1:1'?70:84); c.fillText('YOUR CALL', layout.W/2, layout.H*0.32);
-  const by=layout.H*0.46, bw=layout.W*0.6, bh=104, gap=34;
-  c.fillStyle='#22c55e'; roundRect(c,layout.W/2-bw/2,by,bw,bh,16); c.fill();
-  c.fillStyle='#ef4444'; roundRect(c,layout.W/2-bw/2,by+bh+gap,bw,bh,16); c.fill();
-  c.fillStyle='#fff'; F(c,700,42);
-  c.fillText('👍  DO IT', layout.W/2, by+bh/2);
-  c.fillText('👎  PASS', layout.W/2, by+bh+gap+bh/2);
-  c.fillStyle='rgba(255,255,255,0.7)'; F(c,500,30);
-  c.fillText('Vote in the comments 👇', layout.W/2, by+2*bh+2*gap+28);
-  c.restore();
-}
-
 function drawSingleFrame(elapsed){
   const c=ctx, layout=R.layout, tl=R.timeline, win=tl.win, sides=R.sides, pkg=R.pkg;
   curChipDur=R.chipDur; curChipStagger=R.chipStagger;
@@ -2195,7 +2206,6 @@ function drawSingleFrame(elapsed){
     drawGate(c,layout,elapsed-win.gate.s,win.gate.e-win.gate.s, sides[sides.length-1].teamName);
   }
   if(elapsed>=win.verdict.s){ drawVerdict(c,layout,elapsed-win.verdict.s,pkg); }
-  if(elapsed>=win.end.s){ drawEndCard(c,layout,clamp01((elapsed-win.end.s)/0.4)); }
   drawVignetteNoise(c,layout);
 }
 
@@ -2217,6 +2227,17 @@ function buildSegment(pkg, chipDur, chipStagger){
   win.stamp={s:t,e:t+1.1}; t+=1.1;
   win.hold={s:t,e:t+SEG_HOLD}; t+=SEG_HOLD;
   return { pkg, sides, win, dur:t, chipDur, chipStagger };
+}
+
+// The single acquiring/offering team across all selected packages, or null.
+// Partner team = every team except the one giving up the user's selected player
+// (the seller). If every selected package shares exactly one partner, that's the
+// offering team — drives the "WHAT CAN <TEAM> OFFER FOR <PLAYER>?" intro.
+function soleAcquiringTeam(){
+  if(!R || !R.segments || !selectedPlayers.length) return null;
+  const s = new Set();
+  R.segments.forEach(seg=> partnersOf(seg.pkg).forEach(t=> s.add(t)));
+  return s.size===1 ? [...s][0] : null;
 }
 
 function drawIntroCard(c,layout,alpha,t){
@@ -2247,15 +2268,29 @@ function drawIntroCard(c,layout,alpha,t){
   }
   const n = R.segments.length;
   const player = (selectedPlayers[0] && selectedPlayers[0].player) ? selectedPlayers[0].player.toUpperCase() : 'THIS PLAYER';
-  const head = selectedToTeams.length ? (n + ' PACKAGE' + (n>1?'S':'')) : 'BEST OFFERS';
   const rise=(1-easeOutCubic(clamp01(t/0.8)))*40;
+  const offerTeam = soleAcquiringTeam();   // one team's offer for the player?
+  const sq = layout.aspect==='1:1';
   c.save(); c.translate(0,-rise);
-  let fs=fitFont(c,head,layout.W-120,layout.aspect==='1:1'?86:108,800); F(c,800,fs);
-  c.fillText(head, layout.W/2, layout.H*0.40);
-  c.fillStyle='rgba(255,255,255,0.7)'; F(c,600,layout.aspect==='1:1'?34:40);
-  c.fillText('FOR', layout.W/2, layout.H*0.40 + fs*0.85);
-  c.fillStyle='#a29bfe'; let pf=fitFont(c,player,layout.W-120,layout.aspect==='1:1'?60:74,800); F(c,800,pf);
-  c.fillText(player, layout.W/2, layout.H*0.40 + fs*0.85 + pf*1.0);
+  if(offerTeam){
+    // "WHAT CAN <TEAM> OFFER FOR <PLAYER>?" — every package is this team's offer.
+    let y = layout.H*0.30;
+    let fs=fitFont(c,'WHAT CAN',layout.W-140,sq?58:74,800); F(c,800,fs);
+    c.fillStyle='#fff'; c.fillText('WHAT CAN', layout.W/2, y); y += sq?68:88;
+    let tf=fitFont(c,offerTeam.toUpperCase(),layout.W-120,sq?54:68,800); F(c,800,tf);
+    c.fillStyle='#a29bfe'; c.fillText(offerTeam.toUpperCase(), layout.W/2, y); y += sq?66:84;
+    F(c,700,sq?38:48); c.fillStyle='#fff'; c.fillText('OFFER FOR', layout.W/2, y); y += sq?58:74;
+    let pf=fitFont(c,player,layout.W-120,sq?52:66,800); F(c,800,pf);
+    c.fillStyle='#a29bfe'; c.fillText(player, layout.W/2, y);
+  } else {
+    const head = selectedToTeams.length ? (n + ' PACKAGE' + (n>1?'S':'')) : 'BEST OFFERS';
+    let fs=fitFont(c,head,layout.W-120,sq?86:108,800); F(c,800,fs);
+    c.fillStyle='#fff'; c.fillText(head, layout.W/2, layout.H*0.40);
+    c.fillStyle='rgba(255,255,255,0.7)'; F(c,600,sq?34:40);
+    c.fillText('FOR', layout.W/2, layout.H*0.40 + fs*0.85);
+    c.fillStyle='#a29bfe'; let pf=fitFont(c,player,layout.W-120,sq?60:74,800); F(c,800,pf);
+    c.fillText(player, layout.W/2, layout.H*0.40 + fs*0.85 + pf*1.0);
+  }
   c.restore();
   c.fillStyle='rgba(255,255,255,0.55)'; F(c,500,28);
   c.fillText('Ranked worst → best', layout.W/2, layout.H*0.66);
@@ -2316,27 +2351,14 @@ function drawSegment(c,layout,seg,t,optionNumber){
   c.restore();
 }
 
-function drawFinalCard(c,layout,alpha){
-  c.save(); c.globalAlpha=alpha; c.fillStyle='rgba(15,12,41,0.94)'; c.fillRect(0,0,layout.W,layout.H);
-  c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
-  let fs=fitFont(c,'WHICH ONE WINS?',layout.W-120,layout.aspect==='1:1'?72:90,800); F(c,800,fs);
-  c.fillText('WHICH ONE WINS?', layout.W/2, layout.H*0.36);
-  c.fillStyle='#a29bfe'; F(c,800,layout.aspect==='1:1'?64:80);
-  c.fillText('Vote 👇', layout.W/2, layout.H*0.50);
-  c.fillStyle='rgba(255,255,255,0.8)'; F(c,600,layout.aspect==='1:1'?34:40);
-  c.fillText('Comment your pick', layout.W/2, layout.H*0.60);
-  c.fillStyle='rgba(255,255,255,0.55)'; F(c,500,28);
-  c.fillText('Follow for more trade machine breakdowns', layout.W/2, layout.H*0.68);
-  c.restore();
-}
-
 function drawMultiFrame(elapsed){
   const c=ctx, layout=R.layout;
   drawBackground(c,layout);
   if(elapsed < R.introEnd){
     const a = elapsed<0.3?elapsed/0.3 : elapsed>R.introEnd-0.3?clamp01((R.introEnd-elapsed)/0.3):1;
     drawIntroCard(c,layout,a,elapsed);
-  } else if(elapsed < R.finalStart){
+  } else {
+    // Ends on the last OPTION segment — no trailing vote/brand card.
     for(let i=0;i<R.segments.length;i++){
       const seg=R.segments[i];
       if(elapsed>=seg.s && elapsed<seg.e){
@@ -2344,8 +2366,6 @@ function drawMultiFrame(elapsed){
         break;
       }
     }
-  } else {
-    drawFinalCard(c,layout, clamp01((elapsed-R.finalStart)/0.4));
   }
   drawVignetteNoise(c,layout);
 }
@@ -2360,7 +2380,6 @@ function readTiming(){
     chipStagger: CHIP_STAGGER/speed,
     secPerSeg: Math.max(2, num('tSeg',6.5)),
     introDur: Math.max(0.5, num('tIntro',2.2)),
-    finalDur: Math.max(0.5, num('tFinal',2.8)),
     singleDur: (()=>{ const v=parseFloat($('tSingle').value); return (isNaN(v)||v<=0)?null:v; })()
   };
 }
@@ -2395,7 +2414,8 @@ function prepareRenderFromSelection(){
     });
     let t = T.introDur;
     segments.forEach(s=>{ s.s=t; s.e=t+s.dur; t+=s.dur; });
-    R = { mode:'multi', layout, segments, introEnd:T.introDur, finalStart:t, total:t+T.finalDur };
+    // Total ends at the last segment — no final card, no trailing silent time.
+    R = { mode:'multi', layout, segments, introEnd:T.introDur, total:t };
   }
   return R;
 }
@@ -2572,7 +2592,7 @@ document.querySelectorAll('#aspectSeg button').forEach(b=>b.addEventListener('cl
   b.classList.add('active'); if(collected.length) renderStaticPreview().catch(()=>{});
 }));
 $('quizMode').addEventListener('change',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); });
-['tSeg','tSingle','tIntro','tFinal','tSpeed'].forEach(id=>$(id).addEventListener('input',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); }));
+['tSeg','tSingle','tIntro','tSpeed'].forEach(id=>$(id).addEventListener('input',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); }));
 $('previewBtn').addEventListener('click', async ()=>{
   if(!selectedPackages().length){ setRenderStatus('Select a package first.'); return; }
   setRenderStatus('Previewing…');
@@ -2604,7 +2624,7 @@ $('genBtn').addEventListener('click', generate);
 /* ---- real-trades mode wiring ---- */
 document.querySelectorAll('#modeSeg button').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
 $('loadRealBtn').addEventListener('click', loadRealTrades);
-$('realFilter').addEventListener('input', ()=>{ if(currentMode==='real' && realDeals.length) applyRealFilter(); });
+['realFilter','realTeamFilter'].forEach(id=>$(id).addEventListener('input', ()=>{ if(currentMode==='real' && realDeals.length) applyRealFilter(); }));
 
 // Re-evaluate auto-selection live whenever the user changes the threshold
 // inputs. We only re-run if packages are already collected — otherwise the
