@@ -73,6 +73,10 @@
   iframe#tmFrame{display:none}
   .toolbar-wrap{background:var(--surface);border-bottom:1px solid var(--border);padding:18px 22px}
   .toolbar{max-width:1400px;margin:0 auto}
+  /* ---- input-mode toggle (Build a scenario | Real trades) ---- */
+  .mode-row{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+  .mode-row .seg button{padding:9px 18px;font-size:14px}
+  .mode-hint{color:var(--muted);font-size:12.5px}
   .scenario-row{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap}
   .field{display:flex;flex-direction:column;gap:6px;min-width:0;flex:1 1 0;min-width:150px;position:relative}
   .field > label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0}
@@ -178,6 +182,15 @@
 <!-- ===================== TOOLBAR (Trade Machine-style) ===================== -->
 <div class="toolbar-wrap">
   <div class="toolbar">
+    <div class="mode-row">
+      <div class="seg" id="modeSeg">
+        <button data-mode="scenario" class="active">Build a scenario</button>
+        <button data-mode="real">Real trades</button>
+      </div>
+      <span class="mode-hint" id="modeHint">Auto-build legal packages from a player / destination scenario.</span>
+    </div>
+
+    <div id="scenarioTools">
     <div class="scenario-row">
       <div class="field">
         <label>PLAYER</label>
@@ -237,6 +250,22 @@
       </label>
       <div id="status">Loading live salary data for pickers…</div>
       <div id="banner" class="banner"></div>
+    </div>
+    </div><!-- /#scenarioTools -->
+
+    <!-- ===================== REAL TRADES MODE ===================== -->
+    <div id="realTools" style="display:none">
+      <div class="scenario-row">
+        <div class="field" style="flex:2 1 320px">
+          <label>MOST-BUILT TRADES INVOLVING PLAYER (optional)</label>
+          <input type="text" id="realFilter" placeholder="e.g. Chet Holmgren — leave blank for every trade" autocomplete="off">
+        </div>
+        <button class="btn btn-primary" id="loadRealBtn">↻ Load most-built trades</button>
+      </div>
+      <div class="secondary-row">
+        <div id="realStatus">Pull every trade captured in HoopsMatic’s Trade Machine, grouped by timestamp and ranked by how often each exact deal was built.</div>
+        <div id="realBanner" class="banner"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -336,6 +365,10 @@ const SALARIES_URL = 'https://nba-trade-calculator.thejorgesierra.workers.dev/ap
 const TM_SOURCE_URL = 'https://raw.githubusercontent.com/jsierrahoopshype/TransactionMaster/main/index.html';
 const IMAGE_PROXY   = 'https://hoopshype-rumors-api.thejorgesierra.workers.dev/api/image-proxy?url=';
 const TM_LIVE_ORIGIN = 'https://nba-trade-calculator.thejorgesierra.workers.dev'; // same-origin fast path
+// Real-trades mode reads the live capture of ACTUAL trades built in the Trade
+// Machine. Flat rows (one per outgoing player) share a `ts` per trade. Same
+// origin-gated worker as /api/salaries, so it already works from github.io.
+const TRADE_LOG_URL = 'https://nba-trade-calculator.thejorgesierra.workers.dev/api/trade-log';
 
 /* ------------------------------- tuning ---------------------------------- */
 // The review filter "recommends" (pre-checks) trades whose balance meets the
@@ -492,6 +525,13 @@ const selectedPlayers = [];   // scenario: players to move (objects)
 const excludedPlayers = [];   // scenario: players to exclude (objects)
 const selectedToTeams = [];   // scenario: destination teams (name strings)
 let collected = [];           // [{tradeTeams, verdict, balancePct, hasPicks, key, ...selected}]
+
+/* ------------------------- real-trades mode state ------------------------ */
+let currentMode = 'scenario';   // 'scenario' | 'real'
+let realDeals = [];             // deduped, frequency-ranked deals from the trade log
+let realFilterName = '';        // resolved player name when the "involving X" filter is active
+let ORIGINAL_EMPTY_HTML = '';   // captured at boot so mode-switching can restore it
+const REAL_AUTOSELECT = 6;      // most-built trades pre-checked for the video by default
 
 /* ----------------------------- tiny helpers ------------------------------ */
 function $(id){ return document.getElementById(id); }
@@ -1221,6 +1261,189 @@ function autoSelect(){
 }
 
 /* =====================================================================
+   5b) REAL TRADES MODE — build a frequency-ranked list of ACTUAL trades.
+   Additive path: NO engine, NO legality recompute. Every trade in the log was
+   already validated when it was built in the Trade Machine. We flatten the log,
+   group legs by `ts` into complete trades, dedupe the SAME deal across
+   timestamps, COUNT how often it was built (the ranking key), and hand the
+   resulting packages to the SAME review + multi-package renderer.
+   ===================================================================== */
+function setRealStatus(t){ const el=$('realStatus'); if(el) el.textContent=t||''; }
+function showRealBanner(kind,msg){ const b=$('realBanner'); if(!b)return; b.className='banner show '+kind; b.textContent=msg; }
+function clearRealBanner(){ const b=$('realBanner'); if(!b)return; b.className='banner'; b.textContent=''; }
+
+function setMode(mode){
+  currentMode = mode;
+  document.querySelectorAll('#modeSeg button').forEach(b=>b.classList.toggle('active', b.dataset.mode===mode));
+  const sc=$('scenarioTools'), rt=$('realTools');
+  if(sc) sc.style.display = mode==='real' ? 'none' : '';
+  if(rt) rt.style.display = mode==='real' ? '' : 'none';
+  const hint=$('modeHint');
+  if(hint) hint.textContent = mode==='real'
+    ? 'Rank real completed trades by how often they were built in the Trade Machine.'
+    : 'Auto-build legal packages from a player / destination scenario.';
+  // The two modes don't share a package list — reset the stage on switch.
+  collected = [];
+  animating = false;
+  $('reviewWrap').style.display='none';
+  $('empty').style.display='block';
+  $('empty').innerHTML = mode==='real'
+    ? 'Real trades mode. Click <b>Load most-built trades</b> to pull every trade captured in HoopsMatic’s Trade Machine, grouped and ranked by how many times each exact deal was built.'
+    : ORIGINAL_EMPTY_HTML;
+}
+
+// Flatten { rows:[{ts,from_team,player,salary,to_team}] } into typed legs.
+function parseTradeLogRows(json){
+  const rows = (json && Array.isArray(json.rows)) ? json.rows : [];
+  return rows.map(r=>({
+    ts: String(r.ts==null ? '' : r.ts),
+    from: String(r.from_team||'').trim(),
+    to: String(r.to_team||'').trim(),
+    player: String(r.player||'').trim(),
+    salary: parseSalary(r.salary)
+  })).filter(r=>r.player && r.from && r.to && r.ts);
+}
+// All legs that share one `ts` are ONE trade.
+function groupByTs(rows){
+  const m = new Map();
+  rows.forEach(r=>{ if(!m.has(r.ts)) m.set(r.ts, []); m.get(r.ts).push(r); });
+  return [...m.values()];
+}
+// Canonical identity of a deal: the set of (player: from->to) legs, order-independent.
+// Two trades with the same players moving the same directions collapse to one deal.
+function dealKey(legs){
+  return legs.map(l=> normName(l.player)+'|'+normName(l.from)+'>'+normName(l.to)).sort().join(' ;; ');
+}
+// Look up a headshot / logo / salary for a log player from the picker feed.
+function enrichRealPlayer(leg, teamName){
+  const pick = pickerPlayers.find(p=>normName(p.player)===normName(leg.player));
+  return { player: leg.player, team: teamName, position:'',
+           salary: leg.salary || (pick ? pick.salary : 0),
+           headshot: pick ? (pick.headshot||'') : '',
+           teamLogo: pick ? (pick.teamLogo||'') : '' };
+}
+// Reconstruct tradeTeams[] (engine-compatible shape) from one trade's legs.
+function tradeTeamsFromLegs(legs){
+  const order=[], seen=new Set();
+  legs.forEach(l=>[l.from,l.to].forEach(tn=>{ const k=tn.toLowerCase(); if(tn && !seen.has(k)){ seen.add(k); order.push(tn); } }));
+  return order.map(tn=>{
+    const k=tn.toLowerCase();
+    return {
+      teamName: tn,
+      playersOut: legs.filter(l=>l.from.toLowerCase()===k).map(l=>enrichRealPlayer(l,tn)),
+      // playersIn only feeds the incoming-salary counter; no teamLogo (would be the
+      // giver's logo and pollute this team's logo resolution).
+      playersIn:  legs.filter(l=>l.to.toLowerCase()===k).map(l=>({player:l.player, salary:l.salary})),
+      picksOut:[], rightsOut:[], cashOut:[], tpeUsed:null
+    };
+  });
+}
+// Salary-only balance: min(sideOut)/max(sideOut)*100. LABEL ONLY — never filters.
+function balanceFromTeams(tradeTeams){
+  const sums = tradeTeams.map(t=>(t.playersOut||[]).reduce((s,p)=>s+(p.salary||0),0)).filter(x=>x>0);
+  if(sums.length<2) return null;
+  const mn=Math.min.apply(null,sums), mx=Math.max.apply(null,sums);
+  return mx>0 ? Math.round(100*mn/mx) : null;
+}
+// Group -> dedupe -> count -> rank by build frequency (desc). Frequency is the key.
+function buildRealDeals(rows){
+  const byKey = new Map();
+  groupByTs(rows).forEach(legs=>{
+    if(!legs.length) return;
+    const key = dealKey(legs);
+    let d = byKey.get(key);
+    if(!d){
+      const tradeTeams = tradeTeamsFromLegs(legs);
+      d = { key, buildCount:0, tradeTeams, balancePct: balanceFromTeams(tradeTeams),
+            players: [...new Set(legs.map(l=>l.player))] };
+      byKey.set(key, d);
+    }
+    d.buildCount++;
+  });
+  return [...byKey.values()].sort((a,b)=>
+    b.buildCount-a.buildCount || (b.balancePct||0)-(a.balancePct||0) || a.key.localeCompare(b.key));
+}
+function dealToPackage(d){
+  return {
+    tradeTeams: d.tradeTeams,
+    verdict: { valid:true, type:'valid', message:'' },   // captured live; already legal
+    balancePct: d.balancePct,
+    teamValuesOut: [], losingSide:'unknown',
+    hasPicks:false, provenance:[], anyFallback:false,
+    key: d.key, destTeam:null, buildCount: d.buildCount, selected:false
+  };
+}
+async function loadRealTrades(){
+  clearRealBanner();
+  const btn=$('loadRealBtn'); if(btn) btn.disabled=true;
+  setRealStatus('Fetching real trades from the Trade Machine log…');
+  let json;
+  try{
+    const res = await fetch(TRADE_LOG_URL + '?limit=5000&format=json', { cache:'no-store' });
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    json = await res.json();
+  }catch(e){
+    setRealStatus('');
+    showRealBanner('err','Could not load /api/trade-log ('+e.message+'). Nothing fabricated.');
+    if(btn) btn.disabled=false; return;
+  }
+  const rows = parseTradeLogRows(json);
+  const totalTrades = groupByTs(rows).length;
+  realDeals = buildRealDeals(rows);
+  setRealStatus('Loaded '+rows.length+' log rows · '+totalTrades+' trades · '
+    +realDeals.length+' distinct deals'+(json.source?(' · source: '+String(json.source)):'')+'.');
+  if(!realDeals.length){
+    showRealBanner('info','No real trades in the log yet.'); if(btn) btn.disabled=false; return;
+  }
+  applyRealFilter();
+  if(btn) btn.disabled=false;
+}
+// Filter by "involving player X" (substring on player names) and (re)build the
+// ranked package list. No refetch — filters the already-loaded deals live.
+function applyRealFilter(){
+  const q = (($('realFilter')||{}).value||'').trim().toLowerCase();
+  realFilterName='';
+  let deals = realDeals;
+  if(q){
+    deals = realDeals.filter(d=> d.players.some(n=>n.toLowerCase().includes(q)));
+    // resolve a display name = the matching player built most across the results
+    const counts={};
+    deals.forEach(d=> d.players.forEach(n=>{ if(n.toLowerCase().includes(q)) counts[n]=(counts[n]||0)+d.buildCount; }));
+    let best='', bc=-1; Object.keys(counts).forEach(n=>{ if(counts[n]>bc){bc=counts[n]; best=n;} });
+    realFilterName = best;
+  }
+  collected = deals.map(dealToPackage);   // already ranked by build count
+  const N = Math.min(collected.length, REAL_AUTOSELECT);
+  collected.forEach((p,idx)=> p.selected = idx<N);
+  if(!collected.length){
+    $('reviewWrap').style.display='none';
+    $('empty').style.display='block';
+    $('empty').innerHTML = 'No real trades involve “'+escapeHtml(q)+'”. Clear the filter to see every deal.';
+    return;
+  }
+  renderReview();
+}
+// Review row for a real trade: build count + salary-balance label + LEGAL tag.
+function realRowHtml(pkg,i){
+  const dim = !pkg.selected;
+  const balCls = (pkg.balancePct!=null && pkg.balancePct>=QUALITY_LINE_PCT) ? 'good' : 'low';
+  const balBadge = pkg.balancePct!=null
+    ? `<span class="badge ${balCls}" title="Salary balance (label only — nothing filtered)">${pkg.balancePct}%</span>`
+    : `<span class="badge low" title="Balance unavailable (a side has no salary in the log)">—</span>`;
+  return `<div class="pkg ${dim?'dim':''}" data-i="${i}">
+    <input type="checkbox" data-i="${i}" ${pkg.selected?'checked':''}>
+    <div class="body">
+      <div class="topline">
+        <span class="tag" style="background:var(--accent-dim);color:var(--accent2);border:1px solid rgba(59,130,246,.4)">built ${pkg.buildCount}×</span>
+        ${balBadge}
+        <span class="tag clean">legal</span>
+      </div>
+      <div class="summary">${packageSummaryHtml(pkg)}</div>
+    </div>
+  </div>`;
+}
+
+/* =====================================================================
    5) REVIEW STAGE — ranked list, recommend >= line, rescue below line.
    ===================================================================== */
 function teamSendsSummary(t){
@@ -1260,15 +1483,18 @@ function renderReview(){
   $('videoCard').style.display = 'block';
   $('out').style.display = 'none';
 
+  const real = currentMode==='real';
   const anyPicks = collected.some(p=>p.hasPicks);
   const _minPct = getMinBalancePct();
   const _dir = getSellingDirection();
   const _dirSuffix = _dir==='cantlose' ? ', selling team can\'t lose'
                     : _dir==='cantwin' ? ', selling team can\'t win'
                     : '';
-  $('filterLine').textContent =
-    `Filter: min balance ${_minPct}%${_dirSuffix}. `
-    + `Packages clearing both conditions are pre-checked; others listed dimmed — check to rescue.`;
+  $('filterLine').textContent = real
+    ? 'Real trades ranked by how many times each exact deal was built in the Trade Machine. '
+      + 'Balance % is salary-based and shown as a label only — nothing is filtered out; check/uncheck which to render.'
+    : `Filter: min balance ${_minPct}%${_dirSuffix}. `
+      + `Packages clearing both conditions are pre-checked; others listed dimmed — check to rescue.`;
 
   // ---- per-batch provenance: which players have no trade-value sheet entry ----
   const distinct = new Map();   // player -> source ('sheet' wins if seen anywhere)
@@ -1290,6 +1516,7 @@ function renderReview(){
 
   const list = $('reviewList');
   list.innerHTML = collected.map((pkg,i)=>{
+    if(real) return realRowHtml(pkg,i);
     const passes = pkgPassesFilter(pkg);
     const low = !passes;
     const badgeCls = (low ? 'low' : 'good') + (pkg.anyFallback ? ' approx' : '');
@@ -1331,8 +1558,8 @@ function renderReview(){
   list.querySelectorAll('input[type=checkbox]').forEach(cb=>cb.addEventListener('change',()=>{
     const i = parseInt(cb.dataset.i);
     collected[i].selected = cb.checked;
-    const passes = pkgPassesFilter(collected[i]);
-    cb.closest('.pkg').classList.toggle('dim', !cb.checked && !passes);
+    const passes = real ? true : pkgPassesFilter(collected[i]);
+    cb.closest('.pkg').classList.toggle('dim', real ? !cb.checked : (!cb.checked && !passes));
     updateSelCount();
   }));
 
@@ -1340,7 +1567,9 @@ function renderReview(){
 
   // honest picks note based on what the engine actually emitted
   const picksHint = $('picksHint');
-  if(anyPicks){
+  if(real){
+    picksHint.textContent = '';
+  }else if(anyPicks){
     picksHint.innerHTML = 'Packages tagged <span class="tag picks">picks</span> include draft picks the engine attached (via <code>addPicksToTrade()</code> when “try to include picks” is on).';
   }else if($('tryPicks').checked){
     picksHint.textContent = 'No picks were attached: the engine’s addPicksToTrade() either found no Stepien-legal picks for the acquiring team, or every pick-sweetened version failed validation and was dropped (legal no-pick packages kept).';
@@ -1379,8 +1608,13 @@ function updateSelCount(){
   $('genVideoBtn').disabled = n===0;
   $('downloadBtn').disabled = n===0;
   invalidateVideo();   // selection changed -> any prior recording is stale
-  const best = collected.length ? collected[0].balancePct : 0;
-  $('selCount').textContent = n ? (n+' selected · best '+best+'%') : 'Select at least one package to render.';
+  if(currentMode==='real'){
+    const top = collected.length ? collected[0].buildCount : 0;
+    $('selCount').textContent = n ? (n+' selected · top built '+top+'×') : 'Select at least one trade to render.';
+  }else{
+    const best = collected.length ? collected[0].balancePct : 0;
+    $('selCount').textContent = n ? (n+' selected · best '+best+'%') : 'Select at least one package to render.';
+  }
   // quiz mode only meaningful for a single package
   $('quizWrap').style.opacity = n===1 ? '1' : '.5';
   $('quizMode').disabled = n!==1;
@@ -1989,6 +2223,28 @@ function drawIntroCard(c,layout,alpha,t){
   c.save(); c.globalAlpha=alpha;
   c.fillStyle='rgba(15,12,41,0.95)'; c.fillRect(0,0,layout.W,layout.H);
   c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
+  if(currentMode==='real'){
+    // "MOST-BUILT TRADES" or "MOST-BUILT TRADES FOR <player>" when filtered.
+    const rise=(1-easeOutCubic(clamp01(t/0.8)))*40;
+    c.save(); c.translate(0,-rise);
+    const topY = realFilterName ? layout.H*0.34 : layout.H*0.41;
+    let fs=fitFont(c,'MOST-BUILT',layout.W-120,layout.aspect==='1:1'?92:116,800); F(c,800,fs);
+    c.fillStyle='#fff';
+    c.fillText('MOST-BUILT', layout.W/2, topY);
+    c.fillText('TRADES', layout.W/2, topY+fs*1.02);
+    if(realFilterName){
+      c.fillStyle='rgba(255,255,255,0.7)'; F(c,600,layout.aspect==='1:1'?32:38);
+      c.fillText('FOR', layout.W/2, topY+fs*1.02+fs*0.70);
+      c.fillStyle='#a29bfe';
+      const pf=fitFont(c,realFilterName.toUpperCase(),layout.W-120,layout.aspect==='1:1'?56:70,800); F(c,800,pf);
+      c.fillText(realFilterName.toUpperCase(), layout.W/2, topY+fs*1.02+fs*0.70+pf*0.98);
+    }
+    c.restore();
+    c.fillStyle='rgba(255,255,255,0.55)'; F(c,500,28);
+    c.fillText('Ranked least → most built', layout.W/2, layout.H*0.70);
+    c.restore();
+    return;
+  }
   const n = R.segments.length;
   const player = (selectedPlayers[0] && selectedPlayers[0].player) ? selectedPlayers[0].player.toUpperCase() : 'THIS PLAYER';
   const head = selectedToTeams.length ? (n + ' PACKAGE' + (n>1?'S':'')) : 'BEST OFFERS';
@@ -2126,8 +2382,11 @@ function prepareRenderFromSelection(){
     if(T.singleDur){ const f=T.singleDur/tl.total; scaleWin(tl.win,f); tl.total*=f; chipDur*=f; chipStagger*=f; }
     R = { mode:'single', layout, pkg, sides, timeline:tl, chipDur, chipStagger, total:tl.total };
   } else {
-    // countdown order: lowest balance first, best last
-    const order = sel.slice().sort((a,b)=> a.balancePct - b.balancePct);
+    // countdown order: scenario = lowest balance first (best last); real trades =
+    // least-built first (most-built last, as the climax of the countdown).
+    const order = sel.slice().sort((a,b)=> currentMode==='real'
+      ? (a.buildCount - b.buildCount)
+      : (a.balancePct - b.balancePct));
     const segments = order.map(p=>{
       const seg = buildSegment(p, T.chipDur, T.chipStagger);
       const f = T.secPerSeg/seg.dur;                  // scale to requested seconds/segment
@@ -2342,10 +2601,16 @@ wirePlayerSearch('excludeSearch', 'excludeResults', excludedPlayers, 'excludeChi
 wireTeamSearch('toSearch', 'toResults', selectedToTeams, 'toChips');
 $('genBtn').addEventListener('click', generate);
 
+/* ---- real-trades mode wiring ---- */
+document.querySelectorAll('#modeSeg button').forEach(b=>b.addEventListener('click',()=>setMode(b.dataset.mode)));
+$('loadRealBtn').addEventListener('click', loadRealTrades);
+$('realFilter').addEventListener('input', ()=>{ if(currentMode==='real' && realDeals.length) applyRealFilter(); });
+
 // Re-evaluate auto-selection live whenever the user changes the threshold
 // inputs. We only re-run if packages are already collected — otherwise the
 // new values just feed into the next generate() pass.
 function onThresholdChange(){
+  if(currentMode==='real')return;   // real mode ignores the scenario auto-select thresholds
   if(!collected||!collected.length)return;
   autoSelect();
   renderReview();
@@ -2363,6 +2628,7 @@ document.addEventListener('click', (e)=>{
 });
 
 /* -------------------------------- boot -------------------------------- */
+ORIGINAL_EMPTY_HTML = $('empty').innerHTML;   // capture before any mode switch
 loadPickerData();
 </script>
 </body>
