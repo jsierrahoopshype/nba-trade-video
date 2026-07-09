@@ -328,6 +328,8 @@
               <input type="text" id="tSingle" value="" placeholder="auto" inputmode="decimal"></label>
             <label>Intro sec
               <input type="text" id="tIntro" value="2.2" inputmode="decimal"></label>
+            <label>Final card sec
+              <input type="text" id="tFinal" value="2.0" inputmode="decimal"></label>
             <label>Speed × (chips/counters) <span style="color:#5d6b82">0.5–2</span>
               <input type="text" id="tSpeed" value="1.0" inputmode="decimal"></label>
           </div>
@@ -2253,6 +2255,7 @@ function drawSingleFrame(elapsed){
     drawGate(c,layout,elapsed-win.gate.s,win.gate.e-win.gate.s, sides[sides.length-1].teamName);
   }
   if(elapsed>=win.verdict.s){ drawVerdict(c,layout,elapsed-win.verdict.s,pkg); }
+  if(R.finalStart!=null && elapsed>=R.finalStart){ drawFinalCard(c,layout, clamp01((elapsed-R.finalStart)/0.4)); }
   drawVignetteNoise(c,layout);
 }
 
@@ -2308,8 +2311,7 @@ function drawIntroCard(c,layout,alpha,t){
       c.fillText(realFilterName.toUpperCase(), layout.W/2, topY+fs*1.02+fs*0.70+pf*0.98);
     }
     c.restore();
-    c.fillStyle='rgba(255,255,255,0.55)'; F(c,500,28);
-    c.fillText('Most-built first', layout.W/2, layout.H*0.70);
+    // (subtitle line removed — title only)
     c.restore();
     return;
   }
@@ -2385,7 +2387,7 @@ function drawSegment(c,layout,seg,t,optionNumber){
       c.beginPath(); c.arc(cx,cy,rr,0,Math.PI*2); c.fillStyle=s.color; c.fill();
       c.lineWidth=4; c.strokeStyle='rgba(255,255,255,0.6)'; c.stroke();
       if(logo){ c.save(); c.beginPath(); c.arc(cx,cy,rr-6,0,Math.PI*2); c.clip();
-        const sz=rr*1.7; c.drawImage(logo,cx-sz/2,cy-sz/2,sz,sz); c.restore(); }
+        drawLogoCover(c,logo,cx,cy,rr*1.7); c.restore(); }
       c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='alphabetic'; F(c,700,22);
       c.fillText(s.teamName, cx, cy+rr+34);
       c.restore();
@@ -2397,14 +2399,26 @@ function drawSegment(c,layout,seg,t,optionNumber){
   c.restore();
 }
 
+// Clean end card — brand gradient (same as intro) + a single centered line.
+// No emoji, no vote/follow prompts, nothing else. Both ratios, both modes.
+function drawFinalCard(c,layout,alpha){
+  c.save(); c.globalAlpha=alpha;
+  drawBackground(c,layout);                                   // brand gradient, same as intro
+  c.fillStyle='rgba(15,12,41,0.95)'; c.fillRect(0,0,layout.W,layout.H);
+  c.textAlign='center'; c.textBaseline='middle'; c.fillStyle='#fff';
+  const txt='Put together your own trades at HoopsMatic.com';
+  const fs=fitFont(c,txt,layout.W-120,layout.aspect==='1:1'?46:54,600); F(c,600,fs);
+  c.fillText(txt, layout.W/2, layout.H*0.5);
+  c.restore();
+}
+
 function drawMultiFrame(elapsed){
   const c=ctx, layout=R.layout;
   drawBackground(c,layout);
   if(elapsed < R.introEnd){
     const a = elapsed<0.3?elapsed/0.3 : elapsed>R.introEnd-0.3?clamp01((R.introEnd-elapsed)/0.3):1;
     drawIntroCard(c,layout,a,elapsed);
-  } else {
-    // Ends on the last OPTION segment — no trailing vote/brand card.
+  } else if(elapsed < R.finalStart){
     for(let i=0;i<R.segments.length;i++){
       const seg=R.segments[i];
       if(elapsed>=seg.s && elapsed<seg.e){
@@ -2412,6 +2426,8 @@ function drawMultiFrame(elapsed){
         break;
       }
     }
+  } else {
+    drawFinalCard(c,layout, clamp01((elapsed-R.finalStart)/0.4));
   }
   drawVignetteNoise(c,layout);
 }
@@ -2426,6 +2442,7 @@ function readTiming(){
     chipStagger: CHIP_STAGGER/speed,
     secPerSeg: Math.max(2, num('tSeg',6.5)),
     introDur: Math.max(0.5, num('tIntro',2.2)),
+    finalDur: Math.max(0, num('tFinal',2.0)),
     singleDur: (()=>{ const v=parseFloat($('tSingle').value); return (isNaN(v)||v<=0)?null:v; })()
   };
 }
@@ -2445,7 +2462,9 @@ function prepareRenderFromSelection(){
     const tl = buildSingleTimeline(sides, quiz, T.chipDur, T.chipStagger);
     let chipDur=T.chipDur, chipStagger=T.chipStagger;
     if(T.singleDur){ const f=T.singleDur/tl.total; scaleWin(tl.win,f); tl.total*=f; chipDur*=f; chipStagger*=f; }
-    R = { mode:'single', layout, pkg, sides, timeline:tl, chipDur, chipStagger, total:tl.total };
+    // Append the fixed-duration final card after the (possibly scaled) single timeline.
+    const finalStart = tl.total;
+    R = { mode:'single', layout, pkg, sides, timeline:tl, chipDur, chipStagger, finalStart, total:tl.total+T.finalDur };
   } else {
     // Render EXACTLY the currently-checked trades, in review-list order (top to
     // bottom). `collected` is already in list order (balance desc / most-built
@@ -2460,8 +2479,8 @@ function prepareRenderFromSelection(){
     });
     let t = T.introDur;
     segments.forEach(s=>{ s.s=t; s.e=t+s.dur; t+=s.dur; });
-    // Total ends at the last segment — no final card, no trailing silent time.
-    R = { mode:'multi', layout, segments, introEnd:T.introDur, total:t };
+    // Final card follows the last segment; its duration is part of the total.
+    R = { mode:'multi', layout, segments, introEnd:T.introDur, finalStart:t, total:t+T.finalDur };
   }
   return R;
 }
@@ -2664,7 +2683,7 @@ document.querySelectorAll('#aspectSeg button').forEach(b=>b.addEventListener('cl
   b.classList.add('active'); if(collected.length) renderStaticPreview().catch(()=>{});
 }));
 $('quizMode').addEventListener('change',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); });
-['tSeg','tSingle','tIntro','tSpeed'].forEach(id=>$(id).addEventListener('input',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); }));
+['tSeg','tSingle','tIntro','tFinal','tSpeed'].forEach(id=>$(id).addEventListener('input',()=>{ if(collected.length) renderStaticPreview().catch(()=>{}); }));
 $('previewBtn').addEventListener('click', async ()=>{
   if(!selectedPackages().length){ setRenderStatus('Select a package first.'); return; }
   setRenderStatus('Previewing…');
