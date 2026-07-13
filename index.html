@@ -1305,8 +1305,38 @@ function setMode(mode){
     : ORIGINAL_EMPTY_HTML;
 }
 
-// Flatten { rows:[{ts,from_team,player,salary,to_team}] } into typed legs.
+// Flatten the /api/trade-log response into typed legs { ts, from, to, player, salary }.
+// Supports BOTH response shapes the worker has used:
+//   NEW (grouped): { trades:[ { ts, sides:[ { team, out:[ { name, salary, to } ] } ] } ] }
+//   OLD (flat):    { rows:  [ { ts, from_team, player, salary, to_team } ] }
+// The grouped shape mirrors exactly what the Trade Machine logs (side.team +
+// out[].{name,salary,to}). Downstream (groupByTs / dealKey / buildRealDeals /
+// audit) is UNCHANGED — a grouped trade's `ts` is reused as the group key, so
+// its legs regroup into the same trade.
 function parseTradeLogRows(json){
+  // NEW grouped shape: one object per trade, already carrying ts + sides.
+  if(json && Array.isArray(json.trades)){
+    const legs = [];
+    json.trades.forEach((tr,i)=>{
+      const ts = (tr && tr.ts!=null) ? String(tr.ts) : ('idx'+i);   // ts identifies the trade
+      const sides = (tr && Array.isArray(tr.sides)) ? tr.sides : [];
+      sides.forEach(side=>{
+        const from = String((side && (side.team ?? side.teamName ?? side.from_team ?? side.from)) || '').trim();
+        const outList = (side && (side.out ?? side.players ?? side.playersOut)) || [];
+        (Array.isArray(outList) ? outList : []).forEach(o=>{
+          legs.push({
+            ts,
+            from,
+            to: String((o && (o.to ?? o.to_team ?? o.destination ?? o.dest)) || '').trim(),
+            player: String((o && (o.name ?? o.player ?? o.playerName)) || '').trim(),
+            salary: parseSalary(o && o.salary)
+          });
+        });
+      });
+    });
+    return legs.filter(r=>r.player && r.from && r.to && r.ts);
+  }
+  // OLD flat shape (kept for backward compatibility).
   const rows = (json && Array.isArray(json.rows)) ? json.rows : [];
   return rows.map(r=>({
     ts: String(r.ts==null ? '' : r.ts),
@@ -1405,33 +1435,52 @@ async function loadRealTrades(){
   clearRealBanner();
   const btn=$('loadRealBtn'); if(btn) btn.disabled=true;
   setRealStatus('Fetching real trades from the Trade Machine log…');
+  const url = TRADE_LOG_URL + '?limit=5000&format=json';
   let json;
   try{
-    const res = await fetch(TRADE_LOG_URL + '?limit=5000&format=json', { cache:'no-store' });
+    const res = await fetch(url, { cache:'no-store' });
     if(!res.ok) throw new Error('HTTP '+res.status);
     json = await res.json();
   }catch(e){
+    console.error('[TVG trade-log] FETCH FAILED for '+url+' :', e);
     setRealStatus('');
     showRealBanner('err','Could not load /api/trade-log ('+e.message+'). Nothing fabricated.');
     if(btn) btn.disabled=false; return;
   }
-  const rawRows = (json && Array.isArray(json.rows)) ? json.rows.length : 0;
+  // Raw payload size across both shapes: NEW `trades` (grouped) or OLD `rows` (flat).
+  const rawTrades = (json && Array.isArray(json.trades)) ? json.trades.length : 0;
+  const rawRows   = (json && Array.isArray(json.rows))   ? json.rows.length   : 0;
   const rows = parseTradeLogRows(json);
+  // Loud, non-silent alarm when the response has content but nothing parsed —
+  // the exact symptom of a shape mismatch (e.g. a future rename of trades/sides).
+  if(rows.length === 0){
+    if(rawTrades || rawRows){
+      console.error('[TVG trade-log] UNEXPECTED SHAPE: response had '+(rawTrades||rawRows)
+        +' item(s) but 0 usable legs parsed. Top-level keys: ['+Object.keys(json||{}).join(', ')
+        +']. Sample element:', (json.trades && json.trades[0]) || (json.rows && json.rows[0]) || null);
+      setRealStatus('');
+      showRealBanner('err','Loaded /api/trade-log but could not parse it (unexpected shape — see console). '
+        +'Top-level keys: '+Object.keys(json||{}).join(', ')+'.');
+      if(btn) btn.disabled=false; return;
+    }
+    console.warn('[TVG trade-log] response parsed but empty. Top-level keys: ['+Object.keys(json||{}).join(', ')+']');
+  }
   const distinctTs = new Set(rows.map(r=>r.ts)).size;   // = number of trades (legs share ts)
   const totalTrades = groupByTs(rows).length;
   realDeals = buildRealDeals(rows);
-  // ---- #2 frequency audit: expose exactly how rows collapse to counted deals ----
+  // ---- #2 frequency audit: expose exactly how the log collapses to counted deals ----
   const dist = {};
   realDeals.forEach(d=>{ dist[d.buildCount]=(dist[d.buildCount]||0)+1; });
   const multi = realDeals.filter(d=>d.buildCount>1).length;
-  console.log('[TVG trade-log audit] raw rows='+rawRows+' · usable legs='+rows.length
+  const rawLabel = rawTrades ? (rawTrades+' trades (grouped)') : (rawRows+' rows (flat)');
+  console.log('[TVG trade-log audit] raw='+rawLabel+' · usable legs='+rows.length
     +' · distinct ts (trades)='+distinctTs+' · groupByTs trades='+totalTrades
     +' · distinct deals='+realDeals.length+' · deals built >1×='+multi);
   console.log('[TVG trade-log audit] buildCount distribution (count× : #deals):', dist);
   console.log('[TVG trade-log audit] top deals — buildCount is the # of DISTINCT timestamps (submissions):',
     realDeals.slice(0,10).map(d=>({ builtX:d.buildCount, distinctTimestamps:d.tsList.length,
       timestamps:d.tsList, players:d.players.join(', ') })));
-  setRealStatus('Loaded '+rawRows+' rows ('+rows.length+' usable legs) · '+distinctTs+' distinct timestamps = '
+  setRealStatus('Loaded '+rawLabel+' ('+rows.length+' usable legs) · '+distinctTs+' distinct timestamps = '
     +totalTrades+' trades · '+realDeals.length+' distinct deals'
     +(multi?(' · '+multi+' built >1×'):'')+(json.source?(' · source: '+String(json.source)):'')
     +'. Full audit + per-deal timestamps in the console.');
