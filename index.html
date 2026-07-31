@@ -826,7 +826,7 @@ window.__TVG_BRIDGE__ = (function(){
      a blob: URL, and a blob document cannot replaceState to an http URL --
      the browser rejects it outright. window.location is also not writable.
      So instead we shim URLSearchParams for the duration of the one call:
-     buildTradeFromUrl does `new URLSearchParams(window.location.search)`,
+     buildTradeFromUrl constructs URLSearchParams from window.location.search,
      which is empty here, and the shim substitutes the pasted query. The
      original is restored in a finally block, so nothing leaks past the call. */
   function loadShareLink(query){
