@@ -843,9 +843,20 @@ window.__TVG_BRIDGE__ = (function(){
       Shim.prototype = RealUSP.prototype;
       window.URLSearchParams = Shim;
 
-      tradeTeams.length = 0;
-      try { buildTradeFromUrl(); }
+      /* buildTradeFromUrl RETURNS the roster list, it does not assign to the
+         global tradeTeams -- the engine's own boot assigns it afterwards.
+         Reading the global straight back gave an empty array, which is why
+         every link came back as "fewer than two teams". */
+      var built = null;
+      try { built = buildTradeFromUrl(); }
       finally { window.URLSearchParams = RealUSP; }
+      if (!built || !built.length) return { ok:false, error:'link had no readable trade' };
+
+      // Adopt it as the live trade so validateTrade and the balance model see
+      // the same thing the engine would, then restore what was there before.
+      var previous = tradeTeams;
+      tradeTeams = built;
+      if (typeof redistributePlayers === 'function') { try { redistributePlayers(); } catch(e){} }
 
       var clean = tradeTeams.filter(function(t){
         return t && t.teamName && (
@@ -863,11 +874,16 @@ window.__TVG_BRIDGE__ = (function(){
           tpeUsed:    t.tpeUsed || null
         };
       });
-      if (clean.length < 2) return { ok:false, error:'link produced fewer than two teams' };
+      if (clean.length < 2) { tradeTeams = previous;
+        return { ok:false, error:'link produced fewer than two teams' }; }
 
-      var validation = (typeof validateTrade==='function')
-        ? validateTrade() : { valid:true, message:'' };
-      var bal = (typeof calculateTradeBalance==='function') ? calculateTradeBalance(clean) : null;
+      var validation, bal;
+      try {
+        validation = (typeof validateTrade==='function') ? validateTrade() : { valid:true, message:'' };
+        bal = (typeof calculateTradeBalance==='function') ? calculateTradeBalance(clean) : null;
+      } finally {
+        tradeTeams = previous;                       // leave the engine as we found it
+      }
       var teamValuesOut = clean.map(function(t){
         var v = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
         v += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
