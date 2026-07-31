@@ -820,17 +820,32 @@ window.__TVG_BRIDGE__ = (function(){
      own buildTradeFromUrl(). Re-implementing the p/t/pd/pk/r/c format here
      would drift the moment the Trade Machine changed it; letting the engine
      parse its own links means a video always shows exactly what the link
-     shows. The frame is a blob URL on the parent's origin, so replaceState
-     is allowed and buildTradeFromUrl picks the query up from location. */
+     shows.
+
+     Getting the query INTO the engine is the awkward part. The frame runs on
+     a blob: URL, and a blob document cannot replaceState to an http URL --
+     the browser rejects it outright. window.location is also not writable.
+     So instead we shim URLSearchParams for the duration of the one call:
+     buildTradeFromUrl does `new URLSearchParams(window.location.search)`,
+     which is empty here, and the shim substitutes the pasted query. The
+     original is restored in a finally block, so nothing leaks past the call. */
   function loadShareLink(query){
+    var RealUSP = window.URLSearchParams;
     try{
       if (typeof buildTradeFromUrl !== 'function')
         return { ok:false, error:'engine has no link parser' };
-      try { history.replaceState(null, '', location.pathname + query); }
-      catch(e){ return { ok:false, error:'cannot set location: '+e.message }; }
+
+      var Shim = function(init){
+        if (init === undefined || init === '' || init === '?' || init === location.search)
+          init = query;
+        return new RealUSP(init);
+      };
+      Shim.prototype = RealUSP.prototype;
+      window.URLSearchParams = Shim;
 
       tradeTeams.length = 0;
-      buildTradeFromUrl();
+      try { buildTradeFromUrl(); }
+      finally { window.URLSearchParams = RealUSP; }
 
       var clean = tradeTeams.filter(function(t){
         return t && t.teamName && (
@@ -870,6 +885,7 @@ window.__TVG_BRIDGE__ = (function(){
         verdict: { valid:validation.valid, type:validation.type, message:validation.message }
       };
     }catch(e){
+      window.URLSearchParams = RealUSP;
       return { ok:false, error:'Link bridge exception: '+(e && e.message ? e.message : String(e)) };
     }
   }
