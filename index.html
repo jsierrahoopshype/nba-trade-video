@@ -220,6 +220,13 @@
         <div class="chips" id="excludeChips"></div>
       </div>
 
+      <div class="field">
+        <label>ALWAYS INCLUDE <span style="color:#5d6b82;font-weight:400">— if his team is in the trade</span></label>
+        <input type="text" id="anchorSearch" placeholder="Always include…" autocomplete="off">
+        <div class="results" id="anchorResults" style="display:none"></div>
+        <div class="chips" id="anchorChips"></div>
+      </div>
+
       <button class="btn btn-primary" id="genBtn" disabled>⚙ Generate</button>
     </div>
     <div class="hint" style="margin-top:8px">
@@ -532,6 +539,11 @@ async function loadPlayerAges(){
 let pickerTeams = [];
 const selectedPlayers = [];   // scenario: players to move (objects)
 const excludedPlayers = [];   // scenario: players to exclude (objects)
+/* Anchors are the mirror image of excludes. An excluded player may never
+   appear; an anchor MUST appear whenever his own team is party to the trade.
+   Pick Embiid and every Sixers package has to move Embiid — Sixers trades
+   without him are discarded rather than reshaped. */
+const anchorPlayers = [];
 const selectedToTeams = [];   // scenario: destination teams (name strings)
 let collected = [];           // [{tradeTeams, verdict, balancePct, hasPicks, key, ...selected}]
 
@@ -721,6 +733,7 @@ function baseScenario(){
   return {
     players: selectedPlayers.map(p => slugify(p.player)),
     exclude,
+    anchors: anchorPlayers.map(p => ({ player: p.player, team: p.team })),
     from: $('fromTeam').value ? slugify($('fromTeam').value) : ''
   };
 }
@@ -777,8 +790,22 @@ window.__TVG_BRIDGE__ = (function(){
                     value:(v || p.salary || 0),
                     source: v ? 'sheet' : 'salary' });
       });
+      // Picks were counted in the balance maths but never listed here, so the
+      // breakdown showed a four-first-rounder package as worth nothing. Same
+      // valuation the engine uses: getPickTradeValue (1st $10M, 2nd $3M,
+      // swaps at half).
+      (t.picksOut||[]).forEach(function(pk){
+        rows.push({ player: pickText(pk), team:t.teamName,
+                    value: tvOfPick(pk), source:'pick' });
+      });
     });
     return rows;
+  }
+  function pickText(pk){
+    var parts = [pk.year, pk.round, pk.team || pk.pickTeam].filter(Boolean);
+    var s = parts.join(' ');
+    if (pk.isSwap) s += ' (swap)';
+    return s || 'Draft pick';
   }
   return {
     status: function(){
@@ -802,6 +829,7 @@ window.__TVG_BRIDGE__ = (function(){
         // reset the engine's scenario state (same vars setupTradeLoopFromUrl uses)
         unifiedSelectedPlayers.length = 0;
         excludedPlayers.length = 0;
+        anchorPlayers.length = 0;
         unifiedOriginTeam = null;
         unifiedDestTeam = null;
 
@@ -918,6 +946,26 @@ window.__TVG_BRIDGE__ = (function(){
             tpeUsed:    t.tpeUsed || null
           };
         });
+
+        /* Anchors: if an anchor's own team is party to this trade, he has to
+           be one of the players moving. Checked here rather than by nudging
+           the generator, so the engine keeps full control of what is legal --
+           a package that misses its anchor is simply discarded and the loop
+           tries again. */
+        var anchors = (scn && scn.anchors) || [];
+        if (anchors.length) {
+          var teamsIn = {};
+          clean.forEach(function(t){ teamsIn[String(t.teamName).toLowerCase()] = t; });
+          for (var ai = 0; ai < anchors.length; ai++) {
+            var a = anchors[ai];
+            var host = teamsIn[String(a.team).toLowerCase()];
+            if (!host) continue;                       // his team isn't involved
+            var moving = (host.playersOut||[]).some(function(p){
+              return String(p.player).toLowerCase() === String(a.player).toLowerCase(); });
+            if (!moving) return { ok:false, anchorMiss:true,
+                                  error:'anchor ' + a.player + ' not moving' };
+          }
+        }
 
         var allOut = [];
         clean.forEach(function(t){ (t.playersOut||[]).forEach(function(p){ allOut.push(p.player); }); });
@@ -1125,7 +1173,7 @@ async function generate(){
       // (above), and the engine derives the seller — so `from` is left empty to
       // avoid an inert/conflicting origin. Without a player, `from` drives the
       // team-involving / team↔team paths as before.
-      const scn = { players: base.players, exclude: base.exclude,
+      const scn = { players: base.players, exclude: base.exclude, anchors: base.anchors,
                     from: base.players.length ? '' : base.from, to: dest };
       let res;
       try{
@@ -1137,6 +1185,7 @@ async function generate(){
         return;
       }
       attempts++;
+      if(res && res.anchorMiss){ misses++; continue; }   // retry, not an error
       if(res && res.ok){
         misses = 0;
         if(res.balancePct === null) continue; // can't rank a single-sided result; skip
@@ -1575,6 +1624,13 @@ function verdictTag(v){
   return '<span class="tag note">legal · notes</span>';
 }
 function fmtM(n){ return '$' + (Math.round(n/1e5)/10).toFixed(1) + 'M'; }
+/* Mirrors the Trade Machine's getPickTradeValue so the UI can show a value
+   without reaching into the iframe. Keep in step with the engine constants. */
+const FIRST_ROUND_PICK_TV = 10000000, SECOND_ROUND_PICK_TV = 3000000;
+function pickValueOf(pk){
+  const base = (pk && pk.round === '1st') ? FIRST_ROUND_PICK_TV : SECOND_ROUND_PICK_TV;
+  return (pk && pk.isSwap) ? base * 0.5 : base;
+}
 function provBreakdownHtml(pkg){
   const rows = (pkg.provenance||[]);
   if(!rows.length) return '';
@@ -1582,7 +1638,7 @@ function provBreakdownHtml(pkg){
     `<div class="provrow">
        <span>${escapeHtml(r.player)} <span style="color:#5d6b82">${escapeHtml(r.team||'')}</span></span>
        <span class="val">${fmtM(r.value)}</span>
-       <span class="src ${r.source==='sheet'?'sheet':'fallback'}">${r.source==='sheet'?'sheet':'salary fallback'}</span>
+       <span class="src ${r.source==='sheet'?'sheet':(r.source==='pick'?'sheet':'fallback')}">${r.source==='sheet'?'sheet':(r.source==='pick'?'pick value':'salary fallback')}</span>
      </div>`).join('');
   return `<details class="prov"><summary>value breakdown (${rows.length})</summary>${inner}</details>`;
 }
@@ -1881,7 +1937,8 @@ function sidesFor(pkg){
     const chips = [];
     (t.playersOut||[]).forEach(p=>chips.push({ kind:'player', name:p.player, sub:(p.position||p.team||''),
       salary:p.salary||0, headshot:p.headshot||'' }));
-    (t.picksOut||[]).forEach(pk=>chips.push({ kind:'pick', name:pickLabel(pk), sub:'Draft pick', salary:0, headshot:'' }));
+    (t.picksOut||[]).forEach(pk=>chips.push({ kind:'pick', name:pickLabel(pk),
+      sub:'Draft pick', salary:0, value:pickValueOf(pk), headshot:'' }));
     (t.rightsOut||[]).forEach(r=>chips.push({ kind:'rights', name:(r.playerName||pickLabel(r)), sub:'Draft rights', salary:0, headshot:'' }));
     const total = chips.reduce((s,c)=>s+c.salary,0);
     const inSalary = (t.playersIn||[]).reduce((s,p)=>s+(p.salary||0),0);
@@ -2758,6 +2815,7 @@ $('downloadBtn').addEventListener('click', async ()=>{
 /* ------------------------------- wiring ------------------------------- */
 wirePlayerSearch('playerSearch', 'playerResults', selectedPlayers, 'playerChips', updateFromTeamLock);
 wirePlayerSearch('excludeSearch', 'excludeResults', excludedPlayers, 'excludeChips');
+wirePlayerSearch('anchorSearch', 'anchorResults', anchorPlayers, 'anchorChips');
 wireTeamSearch('toSearch', 'toResults', selectedToTeams, 'toChips');
 $('genBtn').addEventListener('click', generate);
 
@@ -2784,6 +2842,7 @@ function onThresholdChange(){
 document.addEventListener('click', (e)=>{
   if(!e.target.closest('#playerSearch') && !e.target.closest('#playerResults')) $('playerResults').style.display='none';
   if(!e.target.closest('#excludeSearch') && !e.target.closest('#excludeResults')) $('excludeResults').style.display='none';
+  if(!e.target.closest('#anchorSearch') && !e.target.closest('#anchorResults')) $('anchorResults').style.display='none';
   if(!e.target.closest('#toSearch') && !e.target.closest('#toResults')) $('toResults').style.display='none';
 });
 
