@@ -1481,7 +1481,10 @@ async function generateFromLinks(){
     setStatus(`Rebuilding trade ${i+1} of ${links.length}…`);
     let res;
     try{
-      res = frame.contentWindow.__TVG__.loadShareLink(links[i]);
+      const br = frame.contentWindow && frame.contentWindow.__TVG_BRIDGE__;
+      if(!br || typeof br.loadShareLink !== 'function')
+        throw new Error('engine bridge not ready');
+      res = br.loadShareLink(links[i]);
     }catch(err){
       res = { ok:false, error: err && err.message ? err.message : String(err) };
     }
