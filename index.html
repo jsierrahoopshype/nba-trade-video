@@ -2143,14 +2143,25 @@ function sidesFor(pkg){
     const _cands = logoCandidates(t);
     const logo = _cands[0] || '';
     const chips = [];
+    const dIdx = (d, myIdx) => {
+      if (d === undefined || d === null || d === '') {
+        return teams.length === 2 ? (myIdx === 0 ? 1 : 0) : -1;   // 2-team: the other side
+      }
+      const i = typeof d === 'number' ? d : parseInt(d, 10);
+      return (i >= 0 && i < teams.length) ? i : -1;
+    };
+    const myIdx = teams.indexOf(t);
     (t.playersOut||[]).forEach(p=>chips.push({ kind:'player', name:p.player,
       sub:(p.position || p.team || ''), dest:(multi ? destName(p.destination) : ''),
+      destIdx:dIdx(p.destination, myIdx), fromIdx:myIdx,
       salary:p.salary||0, headshot:p.headshot||'' }));
     (t.picksOut||[]).forEach(pk=>chips.push({ kind:'pick', name:pickLabel(pk),
       sub:'Draft pick', dest:(multi ? destName(pk.destination) : ''),
+      destIdx:dIdx(pk.destination, myIdx), fromIdx:myIdx,
       salary:0, value:pickValueOf(pk), headshot:'' }));
     (t.rightsOut||[]).forEach(r=>chips.push({ kind:'rights', name:(r.playerName||pickLabel(r)),
       sub:'Draft rights', dest:(multi ? destName(r.destination) : ''),
+      destIdx:dIdx(r.destination, myIdx), fromIdx:myIdx,
       salary:0, headshot:'' }));
     const total = chips.reduce((s,c)=>s+c.salary,0);
     const inSalary = (t.playersIn||[]).reduce((s,p)=>s+(p.salary||0),0);
@@ -2360,6 +2371,54 @@ function drawTeamHeader(c,col,side,dollars){
   c.fillText(formatSalary(Math.round(dollars)), col.x+col.w, y+34);
 }
 
+/* Slot geometry for n chips inside a region -- the same maths drawTeamChips
+   uses, pulled out so a chip's OUTGOING slot and its INCOMING slot in the
+   receiving team's block can both be computed and interpolated between. */
+function slotsIn(region, n, capH){
+  if(!n) return [];
+  const gap = region.h<280?9:14;
+  const chipH = Math.min(capH, (region.h-gap*(n-1))/n);
+  const totalH = chipH*n+gap*(n-1);
+  const startY = region.y + Math.max(0,(region.h-totalH)/2);
+  const out=[];
+  for(let i=0;i<n;i++) out.push({ x:region.x, y:startY+i*(chipH+gap), w:region.w, h:chipH });
+  return out;
+}
+function regionOf(block, layout){
+  return block.compact
+    ? { x:block.x, y:block.y+COMPACT_HEADER, w:block.w, h:block.h-COMPACT_HEADER-4, from:block.from }
+    : { x:block.x, y:block.y, w:block.w, h:block.h, from:block.from };
+}
+function capFor(block, layout){
+  if(block.compact) return layout.aspect==='1:1' ? 76 : 96;
+  return layout.aspect==='1:1' ? 104 : 120;
+}
+
+/* Every chip's start slot (under the team sending it) and end slot (under the
+   team receiving it). The receiving block is laid out from that team's INCOMING
+   set, so arrivals stack tidily instead of landing on top of each other. */
+function buildPlacements(layout, sides){
+  const info = getTeamBlocks(layout, sides.length);
+  const incoming = sides.map(()=>[]);
+  sides.forEach((side,i)=>side.chips.forEach(ch=>{
+    if(ch.destIdx>=0 && ch.destIdx<sides.length) incoming[ch.destIdx].push(ch);
+  }));
+  const inSlots = incoming.map((list,i)=>
+    slotsIn(regionOf(info.blocks[i],layout), list.length, capFor(info.blocks[i],layout)));
+  const place = new Map();
+  sides.forEach((side,i)=>{
+    const region = regionOf(info.blocks[i],layout);
+    const outS = slotsIn(region, side.chips.length, capFor(info.blocks[i],layout));
+    side.chips.forEach((ch,j)=>{
+      const di = ch.destIdx;
+      const k = (di>=0) ? incoming[di].indexOf(ch) : -1;
+      place.set(ch, { out:outS[j], in:(k>=0 && inSlots[di][k]) ? inSlots[di][k] : outS[j],
+                      from:region.from, teamIdx:i });
+    });
+  });
+  return { info, place };
+}
+
 // Draw a team's chips inside an arbitrary region {x,y,w,h,from}, capped at capH.
 function drawTeamChips(c,region,side,phaseStart,t,capH){
   const n=side.chips.length; if(!n) return;
@@ -2442,12 +2501,53 @@ function drawTeamBlock(c, block, side, phaseStart, t, layout){
 }
 
 // Draw all team blocks + either the 2-side meter (n==2) or rely on per-team deltas (n>=3).
-function drawTeamsStage(c, layout, sides, teamStarts, t, settleStart, settleEnd){
-  const info = getTeamBlocks(layout, sides.length);
-  sides.forEach((side,i)=>{ drawTeamBlock(c, info.blocks[i], side, teamStarts[i], t, layout); });
-  if(info.mode==='meter' && sides.length===2){
-    drawMeter(c, info.meter, sides, teamStarts[0], teamStarts[1], t, settleStart, settleEnd, layout);
+// `xfer` = {s,e} for the phase where every chip flies to the team receiving it.
+function drawTeamsStage(c, layout, sides, teamStarts, t, settleStart, settleEnd, xfer){
+  const moving = xfer && t >= xfer.s;
+  const info = moving ? null : getTeamBlocks(layout, sides.length);
+
+  if(moving){
+    // Headers stay put; only the chips travel. Freeze the header maths at the
+    // moment the flight starts so the totals do not keep ticking mid-move.
+    const blocks = getTeamBlocks(layout, sides.length).blocks;
+    sides.forEach((side,i)=>{
+      if(blocks[i].compact) drawCompactHeader(c, blocks[i], side, teamStarts[i], Math.min(t, xfer.s));
+      else drawTeamHeader(c, blocks[i], side, animatedTotal(side, teamStarts[i], Math.min(t, xfer.s)));
+    });
+    drawChipFlight(c, layout, sides, t, xfer);
+  } else {
+    sides.forEach((side,i)=>{ drawTeamBlock(c, info.blocks[i], side, teamStarts[i], t, layout); });
   }
+
+  const inf2 = info || getTeamBlocks(layout, sides.length);
+  if(inf2.mode==='meter' && sides.length===2){
+    drawMeter(c, inf2.meter, sides, teamStarts[0], teamStarts[1], t, settleStart, settleEnd, layout);
+  }
+}
+
+/* The move itself. Each chip eases from its slot under the team sending it to
+   its slot under the team receiving it, staggered so the board does not lurch
+   all at once, and lifted slightly as it travels so overlapping paths read as
+   passing rather than colliding. */
+function drawChipFlight(c, layout, sides, t, xfer){
+  const { place } = buildPlacements(layout, sides);
+  const all = [];
+  sides.forEach(side=>side.chips.forEach(ch=>all.push({ ch, side })));
+  const span = Math.max(0.001, xfer.e - xfer.s);
+  const per = span * 0.55;                       // each chip's own flight time
+  const step = all.length>1 ? (span-per)/(all.length-1) : 0;
+  all.forEach((it,i)=>{
+    const pl = place.get(it.ch);
+    if(!pl) return;
+    const p = clamp01((t - (xfer.s + i*step)) / per);
+    const e = easeInOutCubic(p);
+    const a = pl.out, b = pl.in;
+    const x = lerp(a.x,b.x,e), y = lerp(a.y,b.y,e);
+    const w = lerp(a.w,b.w,e), h = lerp(a.h,b.h,e);
+    // a gentle arc so a chip crossing the board is legible
+    const lift = Math.sin(Math.PI*e) * (layout.aspect==='1:1' ? 14 : 22);
+    drawChip(c, x, y-lift, w, h, it.ch, it.side.color, 1);
+  });
 }
 
 function drawMeter(c,m,sides,aStart,bStart,t,settleStart,settleEnd,layout){
@@ -2514,6 +2614,7 @@ function buildSingleTimeline(sides, quizMode, chipDur, chipStagger){
     const d=teamPhaseDurT(sides[i].chips.length, chipDur, chipStagger);
     win.teams.push({s:t,e:t+d}); t+=d;
   }
+  win.xfer={s:t,e:t+1.5}; t+=1.5;                 // chips move to their new teams
   win.meter={s:t,e:t+1.4}; t+=1.4;
   // Ends on the verdict — no trailing vote/brand card. A short hold lets the
   // LEGAL stamp + message linger before the clip cuts.
@@ -2607,7 +2708,7 @@ function drawSingleFrame(elapsed){
     c.globalAlpha=layoutA;
     c.fillStyle='#fff'; c.textAlign='center'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?34:42);
     c.fillText('WOULD YOU DO THIS TRADE?', layout.W/2, layout.aspect==='1:1'?112:layout.titleY); // clear the top balance badge on square
-    drawTeamsStage(c,layout,sides,teamStarts,elapsed,win.meter.s,win.meter.e);
+    drawTeamsStage(c,layout,sides,teamStarts,elapsed,win.meter.s,win.meter.e,win.xfer);
     if(elapsed>=lastEnd-0.2 && showBalance(pkg)) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((elapsed-(lastEnd-0.2))/0.4), pkgPassesFilter(pkg));
     c.globalAlpha=1;
   }
@@ -2637,6 +2738,7 @@ function buildSegment(pkg, chipDur, chipStagger){
     const d=teamPhaseDurT(sides[i].chips.length, chipDur, chipStagger);
     win.teams.push({s:t,e:t+d}); t+=d;
   }
+  win.xfer={s:t,e:t+1.3}; t+=1.3;                 // chips move to their new teams
   win.meter={s:t,e:t+0.9}; t+=0.9;
   win.stamp={s:t,e:t+1.1}; t+=1.1;
   win.hold={s:t,e:t+SEG_HOLD}; t+=SEG_HOLD;
@@ -2728,7 +2830,7 @@ function drawSegment(c,layout,seg,t,optionNumber){
     c.fillStyle='#a29bfe'; c.textAlign='left'; c.textBaseline='middle'; F(c,800,layout.aspect==='1:1'?30:36);
     c.fillText('OPTION ' + optionNumber, 40, layout.titleY);
     const teamStarts = win.teams.map(w=>w.s);
-    drawTeamsStage(c,layout,sides,teamStarts,t,win.meter.s,win.meter.e);
+    drawTeamsStage(c,layout,sides,teamStarts,t,win.meter.s,win.meter.e,win.xfer);
     if(t>=win.meter.s && showBalance(pkg)) drawBalanceBadge(c,layout,pkg.balancePct, clamp01((t-win.meter.s)/0.4), pkgPassesFilter(pkg));
     c.restore();
   }
