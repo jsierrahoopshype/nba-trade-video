@@ -186,41 +186,50 @@
       <div class="seg" id="modeSeg">
         <button data-mode="scenario" class="active">Build a scenario</button>
         <button data-mode="real">Real trades</button>
+        <button data-mode="links">Paste links</button>
       </div>
       <span class="mode-hint" id="modeHint">Auto-build legal packages from a player / destination scenario.</span>
     </div>
 
     <div id="scenarioTools">
     <div class="scenario-row">
-      <div class="field">
+      <div class="field" id="playerField">
         <label>PLAYER</label>
         <input type="text" id="playerSearch" placeholder="Any player…" autocomplete="off">
         <div class="results" id="playerResults" style="display:none"></div>
         <div class="chips" id="playerChips"></div>
       </div>
 
-      <div class="field">
+      <div class="field" id="fromField">
         <label title="The team building the offer. With a Player set, this is the team trying to ACQUIRE that player — you get the best package that team can put together.">OFFERING TEAM</label>
         <select id="fromTeam" class="team-select"><option value="">Any team…</option></select>
       </div>
 
       <div class="arrow">→</div>
 
-      <div class="field">
+      <div class="field" id="toField">
         <label>TO</label>
         <input type="text" id="toSearch" placeholder="Any team…" autocomplete="off">
         <div class="results" id="toResults" style="display:none"></div>
         <div class="chips" id="toChips"></div>
       </div>
 
-      <div class="field">
+      <div class="field" id="excludeField">
         <label>EXCLUDE</label>
         <input type="text" id="excludeSearch" placeholder="Exclude…" autocomplete="off">
         <div class="results" id="excludeResults" style="display:none"></div>
         <div class="chips" id="excludeChips"></div>
       </div>
 
-      <div class="field">
+      <div class="field" id="linksField" style="display:none;flex:1 1 100%">
+        <label>TRADE MACHINE LINKS <span style="color:#5d6b82;font-weight:400">— one per line</span></label>
+        <textarea id="linksInput" rows="5" spellcheck="false"
+          placeholder="https://hoopsmatic.com/?p=203954,1629628&amp;t=PHI,TOR&amp;pd=0-1,1-0&#10;https://hoopsmatic.com/?p=..."
+          style="width:100%;font:12px/1.5 ui-monospace,Menlo,monospace;padding:10px;border:1px solid #d7dee8;border-radius:8px;resize:vertical"></textarea>
+        <div class="hint" id="linksCount" style="margin-top:6px;color:#5d6b82"></div>
+      </div>
+
+      <div class="field" id="anchorField">
         <label>ALWAYS INCLUDE <span style="color:#5d6b82;font-weight:400">— if his team is in the trade</span></label>
         <input type="text" id="anchorSearch" placeholder="Always include…" autocomplete="off">
         <div class="results" id="anchorResults" style="display:none"></div>
@@ -807,7 +816,66 @@ window.__TVG_BRIDGE__ = (function(){
     if (pk.isSwap) s += ' (swap)';
     return s || 'Draft pick';
   }
+  /* Rebuild a shared trade by handing the query string back to the engine's
+     own buildTradeFromUrl(). Re-implementing the p/t/pd/pk/r/c format here
+     would drift the moment the Trade Machine changed it; letting the engine
+     parse its own links means a video always shows exactly what the link
+     shows. The frame is a blob URL on the parent's origin, so replaceState
+     is allowed and buildTradeFromUrl picks the query up from location. */
+  function loadShareLink(query){
+    try{
+      if (typeof buildTradeFromUrl !== 'function')
+        return { ok:false, error:'engine has no link parser' };
+      try { history.replaceState(null, '', location.pathname + query); }
+      catch(e){ return { ok:false, error:'cannot set location: '+e.message }; }
+
+      tradeTeams.length = 0;
+      buildTradeFromUrl();
+
+      var clean = tradeTeams.filter(function(t){
+        return t && t.teamName && (
+          (t.playersOut||[]).length || (t.picksOut||[]).length ||
+          (t.rightsOut||[]).length || (t.cashOut||[]).length);
+      }).map(function(t){
+        return {
+          teamName:   t.teamName,
+          playersOut: (t.playersOut||[]).map(function(p){
+                        return { player:p.player, salary:p.salary,
+                                 destination:p.destination, headshot:p.headshot||'' }; }),
+          picksOut:   (t.picksOut||[]),
+          rightsOut:  (t.rightsOut||[]),
+          cashOut:    (t.cashOut||[]),
+          tpeUsed:    t.tpeUsed || null
+        };
+      });
+      if (clean.length < 2) return { ok:false, error:'link produced fewer than two teams' };
+
+      var validation = (typeof validateTrade==='function')
+        ? validateTrade() : { valid:true, message:'' };
+      var bal = (typeof calculateTradeBalance==='function') ? calculateTradeBalance(clean) : null;
+      var teamValuesOut = clean.map(function(t){
+        var v = (t.playersOut||[]).reduce(function(a,p){return a+tvOfPlayer(p);},0);
+        v += (t.picksOut||[]).reduce(function(a,pk){return a+tvOfPick(pk);},0);
+        return { teamName:t.teamName, valueOut:v };
+      });
+      return {
+        ok:true,
+        key: clean.map(function(t){ return t.teamName+':'+(t.playersOut||[]).map(function(p){return p.player;}).sort().join('/'); }).sort().join('|'),
+        hasPicks: clean.some(function(t){ return (t.picksOut||[]).length>0; }),
+        balancePct: (bal && typeof bal.percentage==='number') ? bal.percentage : balancePct(clean),
+        teamValuesOut: teamValuesOut,
+        provenance: provenanceOf(clean),
+        anyFallback: false,
+        tradeTeams: clean,
+        verdict: { valid:validation.valid, type:validation.type, message:validation.message }
+      };
+    }catch(e){
+      return { ok:false, error:'Link bridge exception: '+(e && e.message ? e.message : String(e)) };
+    }
+  }
+
   return {
+    loadShareLink: loadShareLink,
     status: function(){
       try{ return { dataReady: (typeof players!=='undefined' && players && players.length>0),
                     count: (typeof players!=='undefined' && players ? players.length : 0),
@@ -1116,6 +1184,7 @@ function loadTradeMachine(){
    4) Generate -> COLLECT every legal package -> review.  FAIL CLOSED.
    ===================================================================== */
 async function generate(){
+  if (currentMode === 'links') return generateFromLinks();
   clearBanner();
   const base = baseScenario();
   if(!base.players.length && !selectedToTeams.length && !base.from){
@@ -1339,9 +1408,21 @@ function setMode(mode){
   const sc=$('scenarioTools'), rt=$('realTools');
   if(sc) sc.style.display = mode==='real' ? 'none' : '';
   if(rt) rt.style.display = mode==='real' ? '' : 'none';
+  // Links mode reuses the scenario toolbar but swaps the pickers for a textarea:
+  // the search fields mean nothing when the trades are already written down.
+  const lf=$('linksField');
+  if(lf) lf.style.display = mode==='links' ? '' : 'none';
+  ['#playerField','#fromField','#toField','#excludeField','#anchorField'].forEach(sel=>{
+    const el=document.querySelector(sel);
+    if(el) el.style.display = mode==='links' ? 'none' : '';
+  });
+  const gb=$('genBtn');
+  if(gb) gb.textContent = mode==='links' ? '⚙ Load links' : '⚙ Generate';
   const hint=$('modeHint');
   if(hint) hint.textContent = mode==='real'
     ? 'Rank real completed trades by how often they were built in the Trade Machine.'
+    : mode==='links'
+    ? 'Paste Trade Machine share links — each one is rebuilt by the engine exactly as saved.'
     : 'Auto-build legal packages from a player / destination scenario.';
   // The two modes don't share a package list — reset the stage on switch.
   collected = [];
@@ -1350,7 +1431,80 @@ function setMode(mode){
   $('empty').style.display='block';
   $('empty').innerHTML = mode==='real'
     ? 'Real trades mode. Click <b>Load most-built trades</b> to pull every trade captured in HoopsMatic’s Trade Machine, grouped and ranked by how many times each exact deal was built.'
+    : mode==='links'
+    ? 'Paste one or more Trade Machine share links above, then click <b>Load links</b>. Each trade is rebuilt inside the live engine, so legality and values come from the Trade Machine itself — nothing is re-derived here.'
     : ORIGINAL_EMPTY_HTML;
+}
+
+/* Links mode. Each pasted URL is rebuilt inside the engine by its own parser,
+   so what the video shows is exactly what the link shows -- legality, values
+   and balance all come back from the Trade Machine, nothing is re-derived. */
+function parseShareLinks(text){
+  const out = [];
+  (text || '').split(/[\s]+/).forEach(tok => {
+    tok = tok.trim();
+    if (!tok) return;
+    let q = '';
+    const i = tok.indexOf('?');
+    if (i >= 0) q = tok.slice(i);
+    else if (/^[pt]=/.test(tok)) q = '?' + tok;      // bare query pasted
+    if (!q || !/[?&](p|players)=/.test(q)) return;    // needs at least players
+    out.push(q);
+  });
+  return [...new Set(out)];                           // same link twice is one trade
+}
+
+async function generateFromLinks(){
+  clearBanner();
+  const links = parseShareLinks($('linksInput').value);
+  if(!links.length){
+    showBanner('err', 'No Trade Machine links found. Paste full share URLs, one per line.');
+    return;
+  }
+  $('genBtn').disabled = true;
+  $('empty').style.display = 'block';
+  $('reviewWrap').style.display = 'none';
+  setStatus('Loading the Trade Machine engine…');
+
+  let frame;
+  try{
+    frame = await loadTradeMachine();
+  }catch(err){
+    showBanner('err', 'Could not load the Trade Machine: ' + (err && err.message ? err.message : err));
+    $('genBtn').disabled = false;
+    return;
+  }
+
+  collected = [];
+  const failures = [];
+  for(let i = 0; i < links.length; i++){
+    setStatus(`Rebuilding trade ${i+1} of ${links.length}…`);
+    let res;
+    try{
+      res = frame.contentWindow.__TVG__.loadShareLink(links[i]);
+    }catch(err){
+      res = { ok:false, error: err && err.message ? err.message : String(err) };
+    }
+    if(!res || !res.ok){ failures.push({ link: links[i], why: (res && res.error) || 'unknown' }); continue; }
+    // Links are explicit instructions, so an illegal one is reported rather
+    // than silently dropped -- the user asked for THIS trade.
+    collected.push(Object.assign({}, res, { fromLink: links[i] }));
+    await new Promise(r => setTimeout(r, 30));
+  }
+
+  $('genBtn').disabled = false;
+  if(!collected.length){
+    setStatus('');
+    showBanner('err', 'None of those links could be rebuilt. ' +
+      (failures[0] ? 'First problem: ' + failures[0].why : ''));
+    return;
+  }
+  const illegal = collected.filter(c => c.verdict && !c.verdict.valid).length;
+  setStatus(`${collected.length} trade${collected.length===1?'':'s'} rebuilt` +
+    (failures.length ? ` · ${failures.length} link${failures.length===1?'':'s'} failed` : '') +
+    (illegal ? ` · ${illegal} flagged illegal by the engine` : ''));
+  if(failures.length) showBanner('warn', failures.length + ' link(s) could not be rebuilt: ' + failures[0].why);
+  renderReview();
 }
 
 // Flatten the /api/trade-log response into typed legs { ts, from, to, player, salary }.
