@@ -1528,9 +1528,12 @@ async function generateFromLinks(){
       res = { ok:false, error: err && err.message ? err.message : String(err) };
     }
     if(!res || !res.ok){ failures.push({ link: links[i], why: (res && res.error) || 'unknown' }); continue; }
-    // Links are explicit instructions, so an illegal one is reported rather
-    // than silently dropped -- the user asked for THIS trade.
-    collected.push(Object.assign({}, res, { fromLink: links[i] }));
+    /* Every pasted link is checked by default. Scenario mode auto-selects by
+       balance and real mode takes the top few, but a link is an explicit
+       instruction -- you would not paste it if you did not want it. Without
+       `selected` the package list looked full while selectedPackages() was
+       empty, which greyed out every video button. */
+    collected.push(Object.assign({}, res, { fromLink: links[i], selected: true }));
     await new Promise(r => setTimeout(r, 30));
   }
 
