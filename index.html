@@ -863,11 +863,18 @@ window.__TVG_BRIDGE__ = (function(){
           (t.playersOut||[]).length || (t.picksOut||[]).length ||
           (t.rightsOut||[]).length || (t.cashOut||[]).length);
       }).map(function(t){
+        // Mirror the shape run() produces exactly -- playersIn included.
+        // Leaving it out made calculateTradeBalance read undefined.filter.
+        var ser2 = function(p){
+          return { player:p.player, salary:p.salary, destination:p.destination,
+                   headshot:p.headshot||'', team:p.team,
+                   contractStatus:p.contractStatus, poisonPill:p.poisonPill,
+                   isSignAndTrade:p.isSignAndTrade, notAggregated:p.notAggregated,
+                   isMinSalaryException:p.isMinSalaryException }; };
         return {
           teamName:   t.teamName,
-          playersOut: (t.playersOut||[]).map(function(p){
-                        return { player:p.player, salary:p.salary,
-                                 destination:p.destination, headshot:p.headshot||'' }; }),
+          playersOut: (t.playersOut||[]).map(ser2),
+          playersIn:  (t.playersIn||[]).map(ser2),
           picksOut:   (t.picksOut||[]),
           rightsOut:  (t.rightsOut||[]),
           cashOut:    (t.cashOut||[]),
